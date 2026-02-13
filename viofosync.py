@@ -177,6 +177,88 @@ def get_dashcam_filenames(base_url):
         ) from e
 
 
+# HTML directory listing regex
+html_file_re = re.compile(
+    r'<a href="(?P<filepath>[^"]+\.MP4)">'
+    r'<b>(?P<filename>[^<]+)</b></a>'
+    r'<td align=right>\s*(?P<size>[\d.]+)\s*(?P<unit>[KMGT]?B)'
+    r'<td align=right>(?P<datetime>\d{4}/\d{2}/\d{2}'
+    r'\s+\d{2}:\d{2}:\d{2})',
+    re.IGNORECASE,
+)
+
+# Directories to scrape on the dashcam
+DCIM_DIRS = ["/DCIM/Movie", "/DCIM/Movie/Parking"]
+DCIM_DIRS_RO = ["/DCIM/Movie/RO"]
+
+
+def parse_html_size(size_str, unit):
+    """Converts '102.00 MB' style size to bytes."""
+    multipliers = {
+        "B": 1, "KB": 1 << 10, "MB": 1 << 20,
+        "GB": 1 << 30, "TB": 1 << 40,
+    }
+    return int(float(size_str) * multipliers.get(unit, 1))
+
+
+def get_dashcam_filenames_html(base_url):
+    """Gets recordings by scraping the HTML directory listings.
+
+    Much faster than the XML API on cameras with many files.
+    """
+    dirs = DCIM_DIRS_RO if read_only else DCIM_DIRS
+    recordings = []
+
+    for dir_path in dirs:
+        url = f"{base_url}{dir_path}"
+        try:
+            with urllib.request.urlopen(
+                url, timeout=socket_timeout
+            ) as resp:
+                if resp.getcode() != 200:
+                    logger.warning(
+                        f"HTTP {resp.getcode()} for {url}, "
+                        f"skipping"
+                    )
+                    continue
+                html = resp.read().decode('utf-8')
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                logger.debug(
+                    f"Directory not found: {dir_path}"
+                )
+                continue
+            raise
+        except urllib.error.URLError as e:
+            raise RuntimeError(
+                f"Cannot reach dashcam at {base_url}: {e}"
+            ) from e
+        except socket.timeout as e:
+            raise UserWarning(
+                f"Timeout communicating with dashcam at "
+                f"{base_url}: {e}"
+            ) from e
+
+        for m in html_file_re.finditer(html):
+            filepath = m.group("filepath")
+            filename = m.group("filename")
+            size = parse_html_size(
+                m.group("size"), m.group("unit").upper()
+            )
+            ts = parse_viofo_datetime(
+                m.group("datetime").strip()
+            )
+            recordings.append(Recording(
+                filename, filepath, size, None, ts, None
+            ))
+
+    logger.info(
+        f"Found {len(recordings)} recordings on dashcam "
+        f"(HTML mode)"
+    )
+    return recordings
+
+
 def get_filepath(destination, group_name, filename):
     """Constructs a path from destination, group name and filename."""
     if group_name:
@@ -231,10 +313,11 @@ def download_file(base_url, recording, destination, group_name):
     )
 
     # Build download URL — strip drive letter (A: for SD, B: for SSD)
+    # and normalise path separators
     cleaned = re.sub(r'^[A-Z]:', '', recording.filepath).replace(
         '\\', '/'
     )
-    url = f"{base_url}/{cleaned}"
+    url = f"{base_url}/{cleaned.lstrip('/')}"
 
     # Check expected size via HEAD
     try:
@@ -452,7 +535,12 @@ def sync(address, destination, grouping, download_priority,
 
     base_url = f"http://{address}"
     try:
-        dashcam_recordings = get_dashcam_filenames(base_url)
+        if args.html:
+            dashcam_recordings = get_dashcam_filenames_html(
+                base_url
+            )
+        else:
+            dashcam_recordings = get_dashcam_filenames(base_url)
     except (RuntimeError, UserWarning) as e:
         logger.error(f"Sync aborted: {e}")
         return False
@@ -804,6 +892,11 @@ def parse_args():
     parser.add_argument(
         "--gps-extract", action="store_true",
         help="Extract GPS data and create GPX files",
+    )
+    parser.add_argument(
+        "--html", action="store_true",
+        help="Use fast HTML directory scraping instead of "
+        "slow XML API to list recordings",
     )
     parser.add_argument(
         "--version", action="version",

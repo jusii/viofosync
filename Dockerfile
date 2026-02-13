@@ -23,7 +23,8 @@ ENV ADDRESS="" \
     DRY_RUN="" \
     RUN_ONCE="" \
     READ_ONLY="" \
-    GPS_EXTRACT=""
+    GPS_EXTRACT="" \
+    HTML=""
 
 COPY --chown=dashcam viofosync.sh /viofosync.sh
 COPY --chown=dashcam viofosync.py /viofosync.py

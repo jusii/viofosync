@@ -32,5 +32,8 @@ dry_run="${DRY_RUN:+--dry-run}"
 
 gps_extract="${GPS_EXTRACT:+--gps-extract}"
 
+# html scrape mode if HTML set to anything
+html="${HTML:+--html}"
+
 /viofosync.py ${ADDRESS} --destination /recordings ${keep} ${grouping} ${priority} ${disk_usage} ${timeout} ${verbose} ${gps_extract} \
-    ${quiet} ${read_only} ${cron} ${dry_run}
+    ${quiet} ${read_only} ${cron} ${dry_run} ${html}

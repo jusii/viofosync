@@ -63,3 +63,7 @@ services:
       # If set to any value, makes it so that the script communicates what it
       # would do without actually doing anything.
       DRY_RUN: ''
+
+      # Use HTML directory scraping alternative to XML API.
+      # Recommended for cameras that are slow to generate the XML listing.
+      HTML: ''
