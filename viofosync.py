@@ -677,6 +677,30 @@ def get_gps_atom_info(eight_bytes):
     return int(atom_pos), int(atom_size)
 
 
+def get_gps_offset(data):
+    """Finds GPS payload position by scanning for A{N,S}{E,W}
+    pattern. Supports newer VIOFO cameras (e.g. A329S) where
+    GPS data sits at a variable offset within the payload."""
+    pointer = len(data) - 20
+    while pointer > 0:
+        try:
+            active, lon_hemi, lat_hemi = struct.unpack_from(
+                '<sss', data, pointer
+            )
+            active = active.decode()
+            lon_hemi = lon_hemi.decode()
+            lat_hemi = lat_hemi.decode()
+        except UnicodeDecodeError:
+            pointer -= 1
+            continue
+        if (active == 'A'
+                and lon_hemi in ('N', 'S')
+                and lat_hemi in ('E', 'W')):
+            return pointer - 24
+        pointer -= 1
+    return -1
+
+
 def get_gps_data(data):
     gps = {
         'DT': {
@@ -691,18 +715,36 @@ def get_gps_data(data):
         },
     }
 
-    offset = 0
-    hour, minute, second, year, month, day = struct.unpack_from(
-        '<IIIIII', data, offset
-    )
-    offset += 24
-    active, lat_hemi, lon_hemi = struct.unpack_from(
-        '<ccc', data, offset
-    )
-    offset += 4
-    lat_raw, lon_raw, speed, bearing = struct.unpack_from(
-        '<ffff', data, offset
-    )
+    offset = get_gps_offset(data)
+    if offset < 0:
+        return None
+
+    try:
+        hour, minute, second = struct.unpack_from(
+            '<III', data, offset
+        )
+        offset += 12
+        year, month, day = struct.unpack_from(
+            '<III', data, offset
+        )
+        offset += 12
+        _, lat_hemi, lon_hemi = struct.unpack_from(
+            '<sss', data, offset
+        )
+        offset += 4
+        lat_raw, lon_raw = struct.unpack_from(
+            '<ff', data, offset
+        )
+        offset += 8
+        speed, bearing = struct.unpack_from(
+            '<ff', data, offset
+        )
+
+        gps['Loc']['Lat']['Hemi'] = lat_hemi.decode()
+        gps['Loc']['Lon']['Hemi'] = lon_hemi.decode()
+    except (struct.error, UnicodeDecodeError) as e:
+        logger.debug(f"Skipping: bad GPS data. Error: {e}")
+        return None
 
     gps['DT']['Hour'] = hour
     gps['DT']['Minute'] = minute
@@ -714,15 +756,13 @@ def get_gps_data(data):
         hour, minute, second, year, month, day
     )
 
-    gps['Loc']['Lat']['Hemi'] = lat_hemi.decode()
-    gps['Loc']['Lon']['Hemi'] = lon_hemi.decode()
     gps['Loc']['Lat']['Raw'] = lat_raw
     gps['Loc']['Lon']['Raw'] = lon_raw
     gps['Loc']['Lat']['Float'] = fix_coordinates(
-        gps['Loc']['Lat']['Hemi'], gps['Loc']['Lat']['Raw']
+        gps['Loc']['Lat']['Hemi'], lat_raw
     )
     gps['Loc']['Lon']['Float'] = fix_coordinates(
-        gps['Loc']['Lon']['Hemi'], gps['Loc']['Lon']['Raw']
+        gps['Loc']['Lon']['Hemi'], lon_raw
     )
     gps['Loc']['Speed'] = fix_speed(speed)
     gps['Loc']['Bearing'] = bearing
