@@ -6,9 +6,9 @@ It is designed to be run as a Docker container on a NAS or similar device.
 
 This project is based on the great BlackVue Sync by Alessandro Colomba (https://github.com/acolomba) and uses GPX extraction from https://sergei.nz/extracting-gps-data-from-viofo-a119-and-other-novatek-powered-cameras/
 
-## GPS extraction
+## GPS Extraction
 
-If you have a use for GPX files, they can be extracted from the video using the option detailed below.
+If you have a use for GPX files, they can be extracted from the video using the `GPS_EXTRACT` option detailed below.
 
 ## Hardware and Firmware Requirements
 
@@ -46,18 +46,29 @@ To use Viofo Sync as a Docker container, follow these steps:
 
 The following environment variables can be set to configure the behavior of the Viofo Sync Docker container:
 
-- `ADDRESS`: The IP address or hostname of the dashcam.
-- `PUID` and `PGID`: User and group IDs for file permissions.
-- `KEEP`: Retention period for downloaded recordings (e.g., '30d' for 30 days).
-- `GROUPING`: Group recordings by time period ('daily', 'weekly', 'monthly', 'yearly', 'none').
-- `PRIORITY`: Download priority ('date' for oldest first, 'rdate' for newest first).
-- `MAX_USED_DISK`: Maximum disk usage percentage before stopping downloads.
-- `TIMEOUT`: Connection timeout in seconds.
-- `VERBOSE`: Increase logging verbosity (set to a number greater than zero).
-- `QUIET`: Quiet mode, only logs unexpected errors.
-- `CRON`: Enable cron mode for logging.
-- `GPS_EXTRACT`: Enable GPS data extraction and GPX file creation.
-- `DRY_RUN`: Perform a trial run without downloading files.
+| Variable | Description | Default |
+|---|---|---|
+| `ADDRESS` | IP address or hostname of the dashcam | *(required)* |
+| `PUID` | User ID for file permissions | |
+| `PGID` | Group ID for file permissions | |
+| `TZ` | Timezone (e.g. `Europe/London`) | |
+| `KEEP` | Retention period — recordings older than this are deleted. Accepts `<number>[d\|w]` for days or weeks (e.g. `30d`, `4w`) | |
+| `GROUPING` | Group recordings into subdirectories: `daily`, `weekly`, `monthly`, `yearly`, or `none` | `none` |
+| `PRIORITY` | Download order: `date` (oldest first) or `rdate` (newest first) | `date` |
+| `MAX_USED_DISK` | Stop downloading if disk usage exceeds this percentage (5-98) | `90` |
+| `TIMEOUT` | Connection timeout in seconds | `30` |
+| `VERBOSE` | Logging verbosity level (0 = normal, 1+ = debug) | `0` |
+| `QUIET` | Set to any value to only log errors | |
+| `CRON` | Set to any value for reduced cron-mode logging | `1` |
+| `GPS_EXTRACT` | Set to any value to extract GPS data and create `.gpx` files alongside recordings | |
+| `READ_ONLY` | Set to any value to only sync read-only (locked) recordings | |
+| `HTML` | Set to any value to use alternative HTML scraping instead of the XML API. Recommended for cameras that are slow or timeout responding to the XML file listing request | |
+| `DRY_RUN` | Set to any value to show what would happen without downloading or deleting anything | |
+| `RUN_ONCE` | Set to any value to sync once and exit instead of running on a cron schedule | |
+
+## XML vs HTML Mode
+
+By default, Viofo Sync uses the camera's XML API (`/?custom=1&cmd=3015&par=1`) to get the file listing. For some reason on my camera this started running very slowly so setting `HTML=1` switches to scraping the camera's HTTP directory listings (`/DCIM/Movie`, `/DCIM/Movie/Parking`, `/DCIM/Movie/RO`), which seem to load faster.
 
 ## License
 
