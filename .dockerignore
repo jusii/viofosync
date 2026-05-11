@@ -1,0 +1,59 @@
+# --- Version control ---
+.git
+.gitignore
+.gitattributes
+.github
+
+# --- Editor / OS noise (any depth) ---
+**/.DS_Store
+**/*.swp
+**/*.swo
+**/*~
+.idea
+.vscode
+.aider*
+
+# --- Agent / dev tooling state ---
+.claude
+.cursorrules
+.planning
+
+# --- Git worktrees ---
+.worktrees
+worktrees
+
+# --- Python virtualenvs and caches (any depth) ---
+.venv
+venv
+**/__pycache__
+**/*.py[cod]
+**/*$py.class
+.pytest_cache
+.ruff_cache
+.mypy_cache
+
+# --- Local dev ---
+local-config
+recordings
+**/*.db
+**/*.db-wal
+**/*.db-shm
+.env
+.env.*
+**/*.env
+viofosync.env
+config.json
+settings-audit.log
+
+# --- Tests / docs / dev-only tooling ---
+# The runtime image doesn't need any of these.
+tests
+docs
+pyproject.toml
+requirements-dev.txt
+
+# --- Logs and scratch (any depth) ---
+**/*.log
+tmp
+**/*.tmp
+**/*.bak

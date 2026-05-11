@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <title>Viofosync</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+  <link rel="stylesheet"
+    href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+    integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+    crossorigin="" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+    integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+    crossorigin="" defer></script>
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <div id="login" class="view">
+    <form id="login-form">
+      <h1>Viofosync</h1>
+      <label for="pw" class="sr-only">Password</label>
+      <input type="password" id="pw" placeholder="Password"
+             autocomplete="current-password" required />
+      <button type="submit">Unlock</button>
+      <div id="login-error" class="error" role="alert" aria-live="polite"></div>
+    </form>
+  </div>
+
+  <div id="app" class="view" hidden>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <header>
+      <h1>Viofosync</h1>
+      <nav aria-label="Primary">
+        <a href="#/archive" data-tab="archive">Archive</a>
+        <a href="#/downloads" data-tab="downloads">Downloads</a>
+      </nav>
+      <div class="spacer"></div>
+      <span id="dashcam-status" class="status" aria-live="polite">—</span>
+      <button type="button" id="sync-toggle" class="icon-btn"
+              title="Start downloading" aria-label="Start downloading">
+        <!-- Heroicons solid (MIT) — play / pause / arrow-path -->
+        <svg id="sync-icon-play" width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
+          <path fill-rule="evenodd" d="M4.5 5.653c0-1.427 1.529-2.33 2.779-1.643l11.54 6.347c1.295.712 1.295 2.573 0 3.286L7.28 19.99c-1.25.687-2.779-.217-2.779-1.643V5.653Z" clip-rule="evenodd"/>
+        </svg>
+        <svg id="sync-icon-pause" width="18" height="18" viewBox="0 0 24 24" fill="currentColor" hidden>
+          <path fill-rule="evenodd" d="M6.75 5.25a.75.75 0 0 1 .75-.75H9a.75.75 0 0 1 .75.75v13.5a.75.75 0 0 1-.75.75H7.5a.75.75 0 0 1-.75-.75V5.25Zm7.5 0A.75.75 0 0 1 15 4.5h1.5a.75.75 0 0 1 .75.75v13.5a.75.75 0 0 1-.75.75H15a.75.75 0 0 1-.75-.75V5.25Z" clip-rule="evenodd"/>
+        </svg>
+        <svg id="sync-icon-sync" width="18" height="18" viewBox="0 0 24 24" fill="currentColor" hidden>
+          <path fill-rule="evenodd" d="M4.755 10.059a7.5 7.5 0 0 1 12.548-3.364l1.903 1.903h-3.183a.75.75 0 1 0 0 1.5h4.992a.75.75 0 0 0 .75-.75V4.356a.75.75 0 0 0-1.5 0v3.18l-1.9-1.9A9 9 0 0 0 3.306 9.67a.75.75 0 1 0 1.45.388Zm15.408 3.352a.75.75 0 0 0-.919.53 7.5 7.5 0 0 1-12.548 3.364l-1.902-1.903h3.183a.75.75 0 0 0 0-1.5H2.984a.75.75 0 0 0-.75.75v4.992a.75.75 0 0 0 1.5 0v-3.18l1.9 1.9a9 9 0 0 0 15.059-4.035.75.75 0 0 0-.53-.918Z" clip-rule="evenodd"/>
+        </svg>
+      </button>
+      <a href="#/settings" data-tab="settings" class="settings-link"
+         title="Settings" aria-label="Settings">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
+          <path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.488.488 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 0 0-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/>
+        </svg>
+      </a>
+      <button type="button" id="logout">Log out</button>
+    </header>
+
+    <main id="main">
+      <section id="view-archive" class="tab">
+        <div class="view-header">
+          <h2>Archive</h2>
+        </div>
+        <div class="filters archive-filters">
+          <label class="kind-label">
+            <input type="checkbox" id="f-driving" checked /> Driving
+          </label>
+          <label class="kind-label">
+            <input type="checkbox" id="f-parking" checked /> Parking
+          </label>
+          <label class="kind-label">
+            <input type="checkbox" id="f-ro" checked /> Read-only
+          </label>
+          <label class="kind-label" title="Skip Leaflet maps and journey detection for faster browsing">
+            <input type="checkbox" id="f-show-maps" checked /> GPS maps
+          </label>
+          <div class="spacer"></div>
+          <span class="filter-sep"></span>
+          <button type="button" id="rescan">Rescan</button>
+          <button type="button" id="extract-gps">Extract GPS</button>
+        </div>
+        <div id="archive-actions" class="archive-actions">
+          <button type="button" id="exports-toggle" class="exports-toggle"
+                  aria-controls="exports-panel" aria-expanded="false"
+                  title="Show export jobs">
+            <span class="caret" aria-hidden="true">▸</span>
+            <span id="exports-summary">Export jobs</span>
+          </button>
+          <span id="selection-count" class="selection-hint" aria-live="polite"></span>
+          <div class="spacer"></div>
+          <button type="button" id="export-join-front">Join front</button>
+          <button type="button" id="export-join-rear">Join rear</button>
+          <button type="button" id="export-pip">Picture-in-picture</button>
+          <button type="button" id="clear-selection">Clear</button>
+        </div>
+        <div id="exports-panel" class="exports-panel" hidden>
+          <div id="exports-list"></div>
+        </div>
+        <div id="days"></div>
+        <div id="pagination"></div>
+      </section>
+
+      <section id="view-downloads" class="tab" hidden>
+        <div class="view-header">
+          <h2>Download manager</h2>
+        </div>
+        <div id="current-download" class="current"></div>
+        <div class="queue-filters">
+          <label class="kind-label">
+            <input type="checkbox" id="q-kind-driving" checked /> Driving
+          </label>
+          <label class="kind-label">
+            <input type="checkbox" id="q-kind-parking" checked /> Parking
+          </label>
+          <label class="kind-label">
+            <input type="checkbox" id="q-kind-ro" checked /> Read-only
+          </label>
+          <span class="filter-sep"></span>
+          <button type="button" id="q-prio-top">Download selected next</button>
+          <span class="filter-sep"></span>
+          <label class="recent-label">
+            <input type="number" id="q-recent-hours" min="0.5" step="0.5"
+                   value="2" style="width:60px"
+                   aria-label="Recent hours to prioritise" />
+            <button type="button" id="q-prio-recent">Download recent hours next</button>
+          </label>
+        </div>
+        <div id="queue-meta" class="queue-meta"></div>
+        <div id="queue-days"></div>
+
+        <details id="log-panel" class="log-panel">
+          <summary>Event log</summary>
+          <div id="log-entries" class="log-entries"></div>
+        </details>
+      </section>
+
+      <section id="view-settings" class="tab" hidden>
+        <div class="settings-layout">
+          <aside class="settings-sidebar">
+            <a href="#/settings/dashcam" class="settings-nav-link active" data-section="dashcam">Dashcam</a>
+            <a href="#/settings/sync" class="settings-nav-link" data-section="sync">Sync</a>
+            <a href="#/settings/gps" class="settings-nav-link" data-section="gps">GPS &amp; Geocoding</a>
+            <a href="#/settings/exports" class="settings-nav-link" data-section="exports">Exports</a>
+            <a href="#/settings/archive" class="settings-nav-link" data-section="archive">Archives</a>
+            <a href="#/settings/web" class="settings-nav-link" data-section="web">Web server</a>
+            <a href="#/settings/security" class="settings-nav-link" data-section="security">Security</a>
+            <a href="#/settings/system" class="settings-nav-link" data-section="system">System</a>
+          </aside>
+          <div class="settings-pane" id="settings-pane">
+            <p class="hint">Loading…</p>
+          </div>
+        </div>
+        <footer id="settings-footer" class="settings-footer" hidden>
+          <span id="settings-pending-summary" aria-live="polite"></span>
+          <button type="button" id="settings-discard">Discard</button>
+          <button type="button" id="settings-save" class="primary">Save</button>
+        </footer>
+      </section>
+    </main>
+
+    <div id="modal" hidden role="dialog" aria-modal="true" aria-label="Clip player">
+      <div class="modal-inner">
+        <button type="button" id="modal-close" aria-label="Close">×</button>
+        <div id="modal-body"></div>
+        <div class="modal-nav">
+          <button type="button" id="modal-prev" title="Previous clip (←)">← Prev</button>
+          <button type="button" id="modal-toggle" title="Switch camera (F)">Rear view</button>
+          <button type="button" id="modal-next" title="Next clip (→)">Next →</button>
+          <label class="modal-autoplay"
+                 title="Play the next clip automatically when this one ends">
+            <input type="checkbox" id="modal-autoplay" /> Auto-advance
+          </label>
+        </div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

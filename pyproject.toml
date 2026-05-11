@@ -1,0 +1,17 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+filterwarnings = ["error"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+# Scope ruff to scaffolding-task-owned code. Existing web/ has pre-existing
+# violations (Optional/List/Dict typing, import sorting) that later tasks will
+# clean up as those files are touched.
+extend-include = ["tests/**/*.py"]
+extend-exclude = ["viofosync.py", "viofosync_lib/**/*.py", "web/**/*.py"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = ["E501"]  # line length handled by formatter

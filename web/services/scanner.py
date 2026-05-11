@@ -1,0 +1,256 @@
+"""Archive scanner — walks $RECORDINGS and indexes clips.
+
+Uses :func:`viofosync_lib.get_downloaded_recordings` so the
+listing shares the CLI's filename regex. Each clip is upserted
+into ``clip_index`` with derived metadata (camera, sequence,
+event type, GPX presence).
+
+The walk is intentionally bounded to the grouping-folder depth
+the CLI produces — a full ``os.walk`` would descend into the
+``.thumbs`` and ``.exports`` caches.
+
+Event type is a heuristic from the filename + queue source_dir.
+The XML listing's ATTR byte is more authoritative but is only
+available at download time.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import datetime as _dt
+import logging
+import os
+import time
+from dataclasses import dataclass
+from typing import Iterable, List
+
+import viofosync_lib as vfs
+
+from ..db import Database
+from . import thumbs
+
+log = logging.getLogger("viofosync.scanner")
+
+
+@dataclass
+class ClipMeta:
+    path: str
+    basename: str
+    group_name: str
+    timestamp: _dt.datetime
+    camera: str
+    sequence: int
+    event_type: str
+    size_bytes: int
+    has_gpx: bool
+
+
+def _event_type_for(camera_field: str, source_dir: str) -> str:
+    """Categorise a clip into 'normal' / 'parking' / 'ro'.
+
+    Filenames look like ``YYYY_MMDD_HHMMSS_NNNN[event][cam].MP4``
+    where ``event`` is ``P`` (parking), ``E`` (impact), or absent
+    (normal driving), and ``cam`` is ``F``/``R``. The regex captures
+    both characters together as ``camera``, so a parking front clip
+    is ``"PF"`` and a normal rear is ``"R"``.
+
+    RO can't be inferred from the filename — RO clips live under
+    the dashcam's ``/Movie/RO/`` directory, so the caller passes
+    ``source_dir`` (snapshotted from download_queue at scan time).
+    Event-mode clips collapse into ``normal``.
+    """
+    if "/RO/" in source_dir.upper():
+        return "ro"
+    if camera_field.upper().startswith("P"):
+        return "parking"
+    return "normal"
+
+
+def _iter_clips(
+    destination: str,
+    grouping: str,
+    source_dirs: dict[str, str],
+) -> Iterable[ClipMeta]:
+    """Yield every clip under ``destination``.
+
+    ``source_dirs`` maps filename → original dashcam source
+    directory; needed to identify RO clips since the local
+    path doesn't preserve that.
+
+    ``get_downloaded_recordings()`` returns ``(filename, date)``
+    only, so we reconstruct each path from the grouping scheme.
+    Replace with a bounded ``os.walk`` if files ever land outside
+    that layout.
+    """
+    for filename, rec_date in vfs.get_downloaded_recordings(
+        destination, grouping
+    ):
+        m = vfs.downloaded_filename_re.match(filename)
+        if not m:
+            continue
+
+        ts = _dt.datetime(
+            int(m.group("year")), int(m.group("month")),
+            int(m.group("day")), int(m.group("hour")),
+            int(m.group("minute")), int(m.group("second")),
+        )
+        group_name = vfs.get_group_name(ts, grouping) or ""
+        path = vfs.get_filepath(destination, group_name, filename)
+        if not os.path.isfile(path):
+            continue
+
+        camera_field = m.group("camera")
+        yield ClipMeta(
+            path=path,
+            basename=filename,
+            group_name=ts.strftime("%Y-%m-%d"),  # always daily key in UI
+            timestamp=ts,
+            camera=camera_field.upper(),
+            sequence=int(m.group("sequence")),
+            event_type=_event_type_for(
+                camera_field, source_dirs.get(filename, "")
+            ),
+            size_bytes=os.path.getsize(path),
+            has_gpx=os.path.exists(path + ".gpx"),
+        )
+
+
+def scan(db: Database, destination: str, grouping: str) -> int:
+    """Full rescan. Returns the number of rows written.
+
+    The directory walk runs *without* the DB write lock so that a
+    multi-minute scan on a spinning NAS doesn't starve sync_worker
+    and export_jobs. The collected metadata is then flushed in a
+    single short write transaction.
+
+    Idempotent: re-running only bumps ``scanned_at``.
+    """
+    now = int(time.time())
+
+    # Snapshot filename → source_dir from the queue so RO clips
+    # can be identified — the local path doesn't preserve the
+    # /Movie/RO/ origin.
+    with db.conn() as c:
+        rows = c.execute(
+            "SELECT filename, source_dir FROM download_queue"
+        ).fetchall()
+    source_dirs = {r["filename"]: (r["source_dir"] or "") for r in rows}
+
+    clips = list(_iter_clips(destination, grouping, source_dirs))
+    seen_paths: List[str] = [clip.path for clip in clips]
+
+    with db.write() as c:
+        c.execute("BEGIN")
+        try:
+            for clip in clips:
+                # gps_examined uses MAX so a sidecar discovered on
+                # disk lifts the flag, but a sidecar that vanished
+                # (or was never written for an empty result) doesn't
+                # reset it back to 0 — examined is monotonic.
+                c.execute(
+                    """
+                    INSERT INTO clip_index (
+                        path, basename, group_name, timestamp,
+                        camera, sequence, event_type, size_bytes,
+                        has_gpx, gps_examined, scanned_at
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                    ON CONFLICT(path) DO UPDATE SET
+                        size_bytes=excluded.size_bytes,
+                        has_gpx=excluded.has_gpx,
+                        gps_examined=MAX(
+                            clip_index.gps_examined,
+                            excluded.gps_examined
+                        ),
+                        event_type=excluded.event_type,
+                        scanned_at=excluded.scanned_at
+                    """,
+                    (
+                        clip.path,
+                        clip.basename,
+                        clip.group_name,
+                        int(clip.timestamp.timestamp()),
+                        clip.camera,
+                        clip.sequence,
+                        clip.event_type,
+                        clip.size_bytes,
+                        1 if clip.has_gpx else 0,
+                        # Sidecar present → necessarily examined.
+                        1 if clip.has_gpx else 0,
+                        now,
+                    ),
+                )
+
+            # Drop index rows whose files vanished (retention
+            # policy or manual move).
+            if seen_paths:
+                placeholders = ",".join("?" * len(seen_paths))
+                c.execute(
+                    f"DELETE FROM clip_index "
+                    f"WHERE path NOT IN ({placeholders})",
+                    seen_paths,
+                )
+            else:
+                c.execute("DELETE FROM clip_index")
+            c.execute("COMMIT")
+        except Exception:
+            c.execute("ROLLBACK")
+            raise
+
+    return len(seen_paths)
+
+
+async def sweep_missing_thumbs(
+    db: Database,
+    recordings: str,
+    *,
+    concurrency: int = 4,
+) -> int:
+    """Generate thumbnails for any indexed clip that lacks one.
+
+    Concurrency is bounded so we don't fan out dozens of ffmpeg
+    processes on a NAS that may already be busy. Idempotent:
+    clips with a non-empty thumb are skipped (just a stat() per
+    row), so repeat calls are cheap. Returns the number of
+    thumbs successfully generated.
+    """
+    with db.conn() as c:
+        rows = c.execute(
+            "SELECT id, path FROM clip_index"
+        ).fetchall()
+
+    todo: list[tuple[int, str]] = []
+    for row in rows:
+        if not os.path.isfile(row["path"]):
+            continue
+        thumb_file = thumbs.thumb_path(recordings, row["id"])
+        if os.path.exists(thumb_file) and os.path.getsize(thumb_file) > 0:
+            continue
+        todo.append((row["id"], row["path"]))
+
+    if not todo:
+        return 0
+
+    log.info(
+        "thumb sweep: generating %d thumbnail(s) (concurrency=%d)",
+        len(todo), concurrency,
+    )
+    sem = asyncio.Semaphore(concurrency)
+
+    async def _one(clip_id: int, path: str) -> int:
+        async with sem:
+            try:
+                result = await thumbs.ensure_thumb(
+                    recordings, clip_id, path
+                )
+                return 1 if result else 0
+            except Exception as e:  # pragma: no cover — non-fatal
+                log.warning("thumb gen failed for %s: %s", path, e)
+                return 0
+
+    counts = await asyncio.gather(
+        *(_one(cid, p) for cid, p in todo)
+    )
+    generated = sum(counts)
+    log.info("thumb sweep: %d generated, %d skipped",
+             generated, len(todo) - generated)
+    return generated

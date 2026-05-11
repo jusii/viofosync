@@ -4,69 +4,22 @@ services:
     container_name: viofosync
     restart: unless-stopped
 
+    ports:
+      - "8080:8080"
+
     volumes:
-    # Recording download destination. Change only the part before the colon.
-    - /dashcam-recordings:/recordings:rw
+      # Config directory. A template viofosync.env is seeded here on first
+      # run — edit it (ADDRESS, WEB_PASSWORD, etc.) and restart to apply.
+      - /path/to/config:/config
+      # Recordings + SQLite state DB. Change only the part before the colon.
+      - /path/to/recordings:/recordings:rw
 
     environment:
-      # Dashcam address
-      # ADDRESS: 192.168.1.230
-
-      # Set these to the desired destination directory's user id and group id.
+      # UID/GID that owns the host-side config and recordings folders.
+      # Run `id <your-user>` to find the right values.
       PUID: 1000
       PGID: 1000
 
-      # Set to the same timezone as the dashcam. For the complete list of possible values, see:
+      # Timezone for log timestamps and journey grouping.
       # https://en.wikipedia.org/wiki/List_of_tz_database_time_zones
       TZ: Europe/London
-
-      # Priority to download recordings. Pick "date" to download from oldest to
-      # newest; pick "rdate" to download from oldest to newest; pick "type" to
-      # download manual, event (all types), normal and parking recordings in
-      # that order.
-      PRIORITY: date
-
-      # Groups downloaded recordings in directories: 'daily', 'weekly',
-      # 'monthly', 'yearly' and 'none' are supported.
-      GROUPING: daily
-
-      # Retention period of downloaded recordings. Recordings prior to the
-      # retention period will be removed from the destination. Accepted units
-      # are 'd' for days and 'w' for weeks. If no unit is indicated, days are
-      # assumed.
-      KEEP: 2w
-
-      # Store and manage Read Only (locked) video recordings.
-      READ_ONLY: false
-
-      # Stops downloading if the amount of used disk space exceeds the indicated
-      # percentage value.
-      MAX_USED_DISK: 90
-
-      # Sets the timeout in seconds for connecting to the dashcam.
-      TIMEOUT: 10.0
-
-      # Number of attempts for each download (must be >= 1).
-      DOWNLOAD_ATTEMPTS: 1
-
-      # Set to a number greater than zero to increase logging verbosity.
-      VERBOSE: 0
-
-      # Set to any value to quiet down logs: only unexpected errors will be
-      # logged.
-      QUIET: ''
-
-      # Makes it so downloads of normal recordings and unexpected error
-      # conditions are logged. Can be set to '' to disable.
-      CRON: ''
-
-      # Set to any value to enable GPS data extraction and GPX file creation.
-      GPS_EXTRACT: ''
-
-      # If set to any value, makes it so that the script communicates what it
-      # would do without actually doing anything.
-      DRY_RUN: ''
-
-      # Use HTML directory scraping alternative to XML API.
-      # Recommended for cameras that are slow to generate the XML listing.
-      HTML: ''

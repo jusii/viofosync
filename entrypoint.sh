@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
+set -e
 
-/setuid.sh \
-&& su -m dashcam /viofosync.sh \
-&& [[ -z $RUN_ONCE ]] \
-&& crond -f
+mkdir -p /config /recordings
+/setuid.sh
+
+exec su-exec dashcam:dashcam python3 -m web.launcher

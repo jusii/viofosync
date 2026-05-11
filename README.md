@@ -1,76 +1,96 @@
-# Viofo Sync
+# viofosync
 
-Viofo Sync is a tool for synchronizing recordings from a Viofo dashcam (tested with A229 Pro) over Wi-Fi to a local directory.
+Self-hosted web app for syncing, browsing, and exporting recordings from a Viofo dashcam (tested with the A229 Pro) over Wi-Fi. Runs as a single Docker container on a NAS or any always-on host on the same network as the dashcam.
 
-It is designed to be run as a Docker container on a NAS or similar device.
+> **v2 is a full rewrite.** v1 was a cron-driven CLI based on [BlackVueSync](https://github.com/acolomba/BlackVueSync). v2 uses the same dashcam protocol but ships a web UI, journey-detected GPS maps, ffmpeg exports, JSON-backed settings, a first-run setup wizard, and a UI-driven download manager. The v1 cron CLI is preserved on the `main` branch.
 
-This project is based on the great BlackVue Sync by Alessandro Colomba (https://github.com/acolomba) and uses GPX extraction from https://sergei.nz/extracting-gps-data-from-viofo-a119-and-other-novatek-powered-cameras/
+## Features
 
-## GPS Extraction
+- **Archive browser** — view clips grouped by day, front/rear pairs, on-demand thumbnails, in-browser playback, kind filters (Driving / Parking / Read-only), GPS-maps toggle for low-bandwidth browsing.
+- **GPS journeys** — Leaflet + OSM map per trip, automatic stop detection splits a day into journeys, reverse-geocoded start/end labels (e.g. *Whitegate → Sandiway*).
+- **Exports** — select clip pairs, render joined front-only, rear-only, or picture-in-picture videos with ffmpeg. Hardware H.264 (videotoolbox / nvenc / qsv / vaapi) when available, software libx264 fallback.
+- **Download manager** — live progress, reorderable queue, reachability badge, transient timeouts re-queue instead of burning retries.
+- **Auto-delete from dashcam** *(optional)* — clears each clip from the device once it's downloaded and verified.
+- **Settings page** — runtime settings hot-reload rather than Docker env vars; only `WEB_HOST`/`WEB_PORT` need a restart.
 
-If you have a use for GPX files, they can be extracted from the video using the `GPS_EXTRACT` option detailed below.
+## Hardware
 
-## Hardware and Firmware Requirements
+The dashcam must stay powered on and connected to Wi-Fi. A hardwire kit (e.g. Viofo HK4) plus a dedicated dashcam battery is recommended.
 
-The dashcam must remain powered on and connected to Wi-Fi. It is recommended to use a hardwire kit, such as the Viofo HK4, and ideally, a dedicated dashcam battery to prevent draining the car battery.
+It should join your LAN in Wi-Fi **station** mode. As of May 2026 the official A229 Pro firmware does not retain Wi-Fi state across reboots but Viofo support will provide a custom firmware on request.
 
-The dashcam should be connected to the LAN using Wi-Fi station mode.
+Reserve the dashcam's IP on your router so it doesn't change.
 
-As of September 2024, the official A229 Pro firmware does not retain the previous Wi-Fi state after a reboot. However, Viofo support has provided special firmware upon request that retains this state. This feature may be officially released in the near future and is recommended to make downloads fully automated.
+## Quick start
 
-## Using the Docker Container
+```bash
+docker run -d \
+  --name viofosync \
+  -p 8080:8080 \
+  -e PUID=$(id -u) \
+  -e PGID=$(id -g) \
+  -e TZ=Europe/London \
+  -v /path/to/config:/config \
+  -v /path/to/recordings:/recordings \
+  --restart unless-stopped \
+  robxyz/viofosync
+```
 
-To use Viofo Sync as a Docker container, follow these steps:
+Open `http://<host>:8080` and the first boot redirects you to a one-screen setup wizard at `/setup`. Enter the dashcam IP and an admin password (12+ characters) to finish. The wizard writes `/config/config.json` with a freshly-generated `SESSION_SECRET` and a bcrypt hash of the password — neither is held in env vars or the image.
 
-1. **Install Docker:**
+After setup, every other setting lives on the **Settings** page in the UI.
 
-    Download from https://www.docker.com/ if you don't have it already.
+> ⚠ **Setup window safety.** Until the wizard is submitted there is no auth on the container — the wizard self-disables after first submission and the route returns 404 thereafter. Don't expose the container to the public internet during this window.
 
-2. **Run the Docker Container:**
-   ```bash
-   docker run -it --rm \
-       -e ADDRESS=<DASHCAM_IP> \
-       -e PUID=$(id -u) \
-       -e PGID=$(id -g) \
-       -e TZ="Europe/London" \
-       -e KEEP=2w \
-       -e GROUPING=daily
-       -v /path/to/local/directory:/recordings \
-       --name viofosync \
-       robxyz/viofosync
-   ```
+## Configuration
 
-   Replace `<DASHCAM_IP>` with the IP address of your dashcam and `/path/to/local/directory` with the path to your local directory where recordings will be stored.
+The only Docker-level env vars are:
 
-## Configuration Options
 
-The following environment variables can be set to configure the behavior of the Viofo Sync Docker container:
+| Variable        | Description                                      | Default      |
+| --------------- | ------------------------------------------------ | ------------ |
+| `PUID` / `PGID` | Owner of `/config` and `/recordings` on the host | host UID/GID |
+| `TZ`            | Timezone for log timestamps                      | UTC          |
 
-| Variable | Description | Default |
-|---|---|---|
-| `ADDRESS` | IP address or hostname of the dashcam | *(required)* |
-| `PUID` | User ID for file permissions | |
-| `PGID` | Group ID for file permissions | |
-| `TZ` | Timezone (e.g. `Europe/London`) | |
-| `KEEP` | Retention period — recordings older than this are deleted. Accepts `<number>[d\|w]` for days or weeks (e.g. `30d`, `4w`) | |
-| `GROUPING` | Group recordings into subdirectories: `daily`, `weekly`, `monthly`, `yearly`, or `none` | `none` |
-| `PRIORITY` | Download order: `date` (oldest first) or `rdate` (newest first) | `date` |
-| `MAX_USED_DISK` | Stop downloading if disk usage exceeds this percentage (5-98) | `90` |
-| `TIMEOUT` | Connection timeout in seconds | `30` |
-| `DOWNLOAD_ATTEMPTS` | Number of attempts for each download (must be >= 1) | `1` |
-| `VERBOSE` | Logging verbosity level (0 = normal, 1+ = debug) | `0` |
-| `QUIET` | Set to any value to only log errors | |
-| `CRON` | Set to any value for reduced cron-mode logging | `1` |
-| `GPS_EXTRACT` | Set to any value to extract GPS data and create `.gpx` files alongside recordings | |
-| `READ_ONLY` | Set to any value to only sync read-only (locked) recordings | |
-| `HTML` | Set to any value to use alternative HTML scraping instead of the XML API. Recommended for cameras that are slow or timeout responding to the XML file listing request | |
-| `DRY_RUN` | Set to any value to show what would happen without downloading or deleting anything | |
-| `RUN_ONCE` | Set to any value to sync once and exit instead of running on a cron schedule | |
 
-## XML vs HTML Mode
+App-level settings (sync interval, dashcam IP, encoder, geocoding email, web port, retention, password, auto-delete, etc.) are editable on the **Settings** page. Advanced users can hand-edit `/config/config.json` between restarts; the schema lives in `[web/settings_schema.py](web/settings_schema.py)`.
 
-By default, Viofo Sync uses the camera's XML API (`/?custom=1&cmd=3015&par=1`) to get the file listing. For some reason on my camera this started running very slowly so setting `HTML=1` switches to scraping the camera's HTTP directory listings (`/DCIM/Movie`, `/DCIM/Movie/Parking`, `/DCIM/Movie/RO`), which seem to load faster.
+## Reverse geocoding
+
+Journey and stop cards display their start/end as *"Street, Town"* via Nominatim (OpenStreetMap). Lookups are rate-limited to 1/second per [Nominatim's usage policy](https://operations.osmfoundation.org/policies/nominatim/) and cached in the `geocode_cache` table (coords rounded to 3 d.p., ≈110 m). Set **Nominatim email** in Settings → GPS & Geocoding to identify your install per OSM's terms; toggle the **GPS maps** filter off on the Archive page to skip the Leaflet + Nominatim machinery entirely for low-bandwidth browsing.
+
+## XML vs HTML listing
+
+By default the app scrapes the dashcam's HTML directory listings (`/DCIM/Movie`, `/DCIM/Movie/Parking`, `/DCIM/Movie/RO`), which is noticeably faster on some firmware than the XML API (`/?custom=1&cmd=3015&par=1`). Toggle off **Use HTML directory listing** in Settings → Dashcam to fall back to XML.
+
+## Migrating from v1
+
+Existing installs with a `viofosync.env` file are migrated automatically on first boot of the v2 image:
+
+- Settings land in `/config/config.json`.
+- The original `viofosync.env` is preserved with a deprecation header — safe to delete.
+- The cron-style entry point is no longer the primary path; the web app's sync worker covers the same ground with live progress and queue control.
+
+`PUID` / `PGID` / `TZ` env vars work the same as v1.
+
+## Running without Docker
+
+For development or for hosts that don't have Docker:
+
+```bash
+pip install -r requirements.txt
+CONFIG_DIR=/path/to/config RECORDINGS=/path/to/archive \
+  python3 -m web.launcher
+```
+
+`web.launcher` reads `WEB_HOST` / `WEB_PORT` from `config.json` (defaults `0.0.0.0:8080`) and re-execs into uvicorn. On first run, browse to `http://localhost:8080/setup`. `ffmpeg` must be on `$PATH` for thumbnails and exports.
+
+## Credits
+
+The GPX extraction logic uses the method described at [https://sergei.nz/extracting-gps-data-from-viofo-a119-and-other-novatek-powered-cameras/](https://sergei.nz/extracting-gps-data-from-viofo-a119-and-other-novatek-powered-cameras/).
+
+This software is unaffiliated with Viofo or any other vendor.
 
 ## License
 
-This project is licensed under the MIT License. See the [COPYING](COPYING) file for details.
+MIT — see [COPYING](COPYING).

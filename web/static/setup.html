@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Set up Viofosync</title>
+  <link rel="stylesheet" href="/static/setup.css" />
+  <script src="/static/setup.js" defer></script>
+</head>
+<body>
+  <main>
+    <h1>Set up Viofosync</h1>
+    <div id="banner" class="banner-warning">
+      ⚠ This setup screen is publicly accessible until you complete it.
+      Don't expose this container to the internet during first boot.
+    </div>
+    <form id="setup-form" method="POST" action="/setup">
+      <label>
+        Dashcam IP or hostname (optional)
+        <div class="row">
+          <input type="text" id="address" name="address"
+                 placeholder="192.168.1.230" />
+          <button type="button" id="test-btn">Test</button>
+        </div>
+        <span id="test-result" class="hint"></span>
+      </label>
+
+      <label>
+        Admin password (min 8 characters)
+        <input type="password" id="password" name="password"
+               minlength="8" required autocomplete="new-password" />
+        <span id="strength" class="hint"></span>
+      </label>
+
+      <label>
+        Confirm password
+        <input type="password" id="confirm" name="confirm"
+               minlength="8" required autocomplete="new-password" />
+        <span id="match" class="hint"></span>
+      </label>
+
+      <div id="error" class="error" hidden></div>
+      <button type="submit" id="submit">Continue →</button>
+    </form>
+  </main>
+</body>
+</html>

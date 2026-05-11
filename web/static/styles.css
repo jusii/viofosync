@@ -1,0 +1,1472 @@
+:root {
+  /* Palette. Neutrals are tinted toward the brand blue (hue ~250,
+   * chroma 0.008-0.016) so backgrounds and borders feel cohesive with
+   * the accent without reading as "tinted". The accent is a saturated
+   * cobalt; all chrome (active nav, focus rings, progress, selection,
+   * map polyline, primary CTAs) routes through it. */
+  --bg: oklch(0.15 0.008 250);
+  --panel: oklch(0.20 0.010 250);
+  --panel-2: oklch(0.25 0.012 250);
+  --panel-3: oklch(0.30 0.014 250);
+  --border: oklch(0.32 0.014 250);
+  --border-hover: oklch(0.40 0.016 250);
+  --text: oklch(0.94 0.008 250);
+  --muted: oklch(0.66 0.018 250);
+
+  /* Accent: cobalt. Sits a touch brighter than the legacy #4c8dff
+   * (≈ oklch 0.65/0.18) so dark text passes WCAG AA on top — the
+   * original white-on-cobalt was a 2.5:1 contrast fail. */
+  --accent: oklch(0.68 0.19 258);
+  --accent-08: oklch(0.68 0.19 258 / 0.08);
+  --accent-10: oklch(0.68 0.19 258 / 0.10);
+  --accent-18: oklch(0.68 0.19 258 / 0.18);
+  --accent-35: oklch(0.68 0.19 258 / 0.35);
+  --accent-45: oklch(0.68 0.19 258 / 0.45);
+  --accent-85: oklch(0.68 0.19 258 / 0.85);
+  --on-accent: oklch(0.15 0.008 250); /* dark text on cobalt buttons */
+
+  /* Semantic. --err comes in two lightnesses because the saturated red
+   * used to fail AA contrast for text (audit flagged 4.12:1). The
+   * lighter --err-text is for inline error copy; --err itself stays
+   * for fills and borders. */
+  --ok: oklch(0.74 0.16 145);
+  --warn: oklch(0.82 0.16 85);
+  --err: oklch(0.62 0.20 28);
+  --err-text: oklch(0.76 0.18 28);
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; height: 100%; }
+[hidden] { display: none !important; }
+body {
+  font-family: -apple-system, system-ui, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 14px;
+}
+
+/* Visually-hidden but reachable by screen readers.
+ * Used for the password field label and for any future
+ * decorative-icon labels. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Skip-to-content link. Off-screen until a keyboard user
+ * tabs to it, at which point it floats over the header. */
+.skip-link {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  padding: 8px 14px;
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  z-index: 10000;
+  transform: translateY(-200%);
+  transition: transform 160ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.skip-link:focus-visible {
+  transform: translateY(0);
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-35);
+}
+
+/* Universal focus ring. The desktop browser default is a 2px
+ * grey outline that vanishes against --panel; this replaces it
+ * with the brand accent at every interactive surface that
+ * doesn't already define its own focus style. Uses :focus-visible
+ * so mouse clicks don't get a permanent ring. */
+:where(
+  button,
+  a,
+  input,
+  select,
+  textarea,
+  summary,
+  [tabindex]
+):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+.icon-btn:focus-visible,
+.settings-link:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+nav a:focus-visible {
+  outline-offset: 0;
+  background: var(--accent-10);
+}
+.settings-nav-link:focus-visible {
+  outline-offset: -2px;
+}
+a { color: var(--accent); text-decoration: none; }
+button {
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  padding: 6px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+button:hover { background: var(--panel-3); }
+input, select {
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  padding: 6px 8px;
+  border-radius: 6px;
+}
+/* Every native check/radio gets the brand amber. The settings pane
+ * and journey-check rules used to set this individually; this base
+ * declaration covers the filter strips, clip-pair ticks, queue-day
+ * checkboxes, and modal autoplay too. */
+input[type="checkbox"],
+input[type="radio"] {
+  accent-color: var(--accent);
+}
+.icon-btn {
+  display: flex; align-items: center; justify-content: center;
+  width: 34px; height: 34px; padding: 0;
+  border-radius: 50%;
+}
+.icon-btn:hover { background: var(--panel-3); }
+.icon-btn.active { color: var(--ok); border-color: var(--ok); }
+/* When the syncing icon is the visible one, give it a gentle
+ * continuous spin so the button reads as "in progress". */
+.icon-btn.active #sync-icon-sync:not([hidden]) {
+  animation: vfs-spin 1.6s linear infinite;
+  transform-origin: 50% 50%;
+}
+@keyframes vfs-spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+.icon-btn.paused {
+  color: var(--err-text);
+  border-color: var(--err);
+  animation: pulse-red 2s ease-in-out infinite;
+}
+@keyframes pulse-red {
+  0%, 100% { box-shadow: 0 0 4px oklch(0.62 0.20 28 / 0.3); }
+  50% { box-shadow: 0 0 12px oklch(0.62 0.20 28 / 0.7); }
+}
+.cancel-btn {
+  background: none; border: none; color: var(--muted);
+  cursor: pointer; font-size: 18px; padding: 0 4px;
+  line-height: 1;
+}
+.cancel-btn:hover { color: var(--err-text); }
+.current-header {
+  display: flex; align-items: center; gap: 8px;
+}
+.current-header .spacer { flex: 1; }
+.view { min-height: 100vh; }
+.error { color: var(--err-text); margin-top: 8px; min-height: 1em; }
+
+/* Login */
+#login { display: flex; align-items: center; justify-content: center; }
+#login-form {
+  background: var(--panel);
+  padding: 32px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  min-width: 320px;
+}
+#login-form h1 { margin-top: 0; }
+#login-form input { width: 100%; margin: 8px 0; }
+#login-form button {
+  width: 100%;
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent);
+  font-weight: 600;
+  padding: 10px 12px;
+}
+#login-form button:hover { filter: brightness(1.06); background: var(--accent); }
+
+/* App chrome */
+#app header {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 12px 24px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+}
+#app header h1 { margin: 0; font-size: 18px; }
+nav a {
+  padding: 6px 12px;
+  border-radius: 6px;
+}
+nav a.active { background: var(--panel-2); }
+
+/* Settings cog — top-right icon link. Same 34x34 footprint as
+ * the sync-toggle .icon-btn but its own active/hover styling so
+ * it doesn't pick up the icon-btn's "syncing-green" treatment. */
+.settings-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 6px;
+  color: var(--muted);
+  text-decoration: none;
+  border: 1px solid transparent;
+  transition: color 120ms ease, background 120ms ease,
+              border-color 120ms ease;
+}
+.settings-link:hover {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.04);
+}
+.settings-link.active {
+  color: var(--text);
+  background: var(--panel-2);
+  border-color: var(--border);
+}
+.spacer { flex: 1; }
+.status {
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  font-size: 12px;
+}
+.status.offline { color: var(--err-text); border-color: var(--err); }
+.status.online { color: var(--ok); border-color: var(--ok); }
+
+main {
+  padding: 24px;
+  max-width: 1400px;
+  margin: 0 auto;
+}
+
+/* Filters */
+.filters {
+  display: flex; flex-wrap: wrap; gap: 12px;
+  padding: 12px; background: var(--panel);
+  border: 1px solid var(--border); border-radius: 8px;
+  margin-bottom: 16px;
+  align-items: center;
+}
+.filters label {
+  display: flex; flex-direction: column;
+  font-size: 12px; color: var(--muted); gap: 2px;
+}
+.archive-filters .spacer { flex: 1; }
+.archive-filters .kind-label { flex-direction: row; }
+
+.archive-actions {
+  display: flex; align-items: center; gap: 8px;
+  flex-wrap: wrap;
+  padding: 6px 12px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin-bottom: 16px;
+  position: sticky;
+  top: 8px;
+  /* Leaflet's control container is at z-index 1000 (zoom buttons
+   * and attribution); we have to clear that, not just the panes
+   * (which top out around 700). 1100 puts the bar reliably
+   * above every Leaflet layer. */
+  z-index: 1100;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+  transition: border-color 160ms ease, box-shadow 160ms ease,
+              background 160ms ease;
+}
+/* "Live" treatment kicks in only when there's a selection.
+ * The accent tint is layered ABOVE the opaque panel — using it
+ * as background-color directly would let map tiles bleed through
+ * the bar when it sits over a journey map. */
+.archive-actions.has-selection {
+  border-color: var(--accent);
+  background:
+    linear-gradient(
+      to right,
+      var(--accent-08),
+      transparent 40%
+    ),
+    var(--panel);
+  box-shadow: 0 6px 16px oklch(0 0 0 / 0.45);
+}
+.archive-actions .spacer { flex: 1; }
+.archive-actions #selection-count {
+  font-size: 12px;
+  color: var(--text); font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  margin-left: 4px;
+}
+.archive-actions #selection-count:empty { display: none; }
+.archive-actions.has-selection #selection-count {
+  color: var(--accent);
+}
+/* Inline Export jobs toggle in the action bar.
+ * Styled to look like a clickable summary line — muted text,
+ * caret on the left, hover lifts to full text colour. */
+.exports-toggle {
+  display: inline-flex; align-items: center; gap: 6px;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--muted);
+  padding: 4px 8px;
+  font-size: 12px;
+  cursor: pointer;
+  border-radius: 6px;
+}
+.exports-toggle:hover {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.04);
+}
+.exports-toggle .caret {
+  font-size: 10px;
+  width: 10px;
+}
+
+/* Drop-down panel below the action bar, populated by JS.
+ * Sticks just under the (also-sticky) action bar so the jobs
+ * table follows the user down the page. top:50px deliberately
+ * overlaps the bar's bottom edge by a few px so there's no
+ * visible gap between them; z-index 1099 sits one below the
+ * action bar's 1100 so the bar visually covers that overlap. */
+.exports-panel {
+  margin: 0 0 24px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 4px 8px;
+  position: sticky;
+  top: 50px;
+  z-index: 1099;
+  max-height: 50vh;
+  overflow-y: auto;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+}
+.exports-panel[hidden] { display: none; }
+.exports-panel.just-submitted {
+  animation: exports-flash 1.6s ease-out;
+}
+@keyframes exports-flash {
+  0%   { box-shadow: 0 0 0 2px var(--accent-85),
+                     0 0 24px var(--accent-45); }
+  100% { box-shadow: 0 0 0 0 transparent,
+                     0 0 0 transparent; }
+}
+.exports-table { width: 100%; border-collapse: collapse; }
+.exports-table th, .exports-table td {
+  padding: 6px 10px; text-align: left;
+  border-bottom: 1px solid var(--border); font-size: 13px;
+}
+.exports-table th { color: var(--muted); font-weight: 500; }
+.state-queued   { color: var(--muted); }
+.state-running  { color: var(--accent); }
+.state-cancelled { color: var(--warn); }
+
+/* Day cards */
+.day {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin-bottom: 8px;
+  overflow: hidden;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+.day:hover { border-color: var(--border-hover); }
+.day-header {
+  padding: 14px 18px;
+  cursor: pointer;
+  display: flex;
+  gap: 14px;
+  align-items: baseline;
+}
+.day-header:hover { background: rgba(255, 255, 255, 0.015); }
+/* The date is the strongest landmark on the archive page;
+ * it deserves more weight than the metadata that follows it.
+ * Pre-bolder this was 15px/600 (≈1.07× the 14px body — flat).
+ * Bumping to 18px/700 puts the scale ratio at 1.28× which is the
+ * lower bound of the impeccable typography law (≥1.25× per step). */
+.day-header h3 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  font-variant-numeric: tabular-nums;
+  flex: 0 0 auto;
+}
+.day-header .meta {
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.01em;
+}
+.day-header .meta .sep {
+  color: var(--border-hover);
+  margin: 0 6px;
+}
+.day-body { padding: 16px 18px; border-top: 1px solid var(--border); }
+.day-body[hidden] { display: none; }
+
+.clip-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 12px;
+}
+.clip-pair {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px;
+  overflow: hidden;
+}
+.clip-pair .time {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.005em;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.clip-pair .time label { flex: 1 1 auto; }
+.clip-pair .time .kind-badge { font-weight: 500; }
+.clip-pair .thumbs {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 4px;
+  margin: 6px 0;
+}
+.clip-pair img {
+  width: 100%; aspect-ratio: 16/9; object-fit: cover;
+  background: var(--bg); border-radius: 4px; cursor: pointer;
+}
+/* Filenames are debug-y data; fade them and clip to one line.
+ * Hover reveals the full string via the title attribute on the
+ * label element (set in the renderer). */
+.clip-pair .label {
+  font-size: 10px;
+  color: var(--muted);
+  font-family: "SF Mono", "Menlo", monospace;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  opacity: 0.75;
+}
+.clip-pair:hover .label { opacity: 1; }
+.clip-pair.flash {
+  outline: 2px solid var(--accent);
+  animation: flash-pulse 1.5s ease-out;
+}
+@keyframes flash-pulse {
+  0%   { box-shadow: 0 0 28px var(--accent-85); }
+  100% { box-shadow: 0 0 0 transparent; }
+}
+
+#map { height: 340px; border-radius: 8px; margin: 16px 0; }
+
+.journey-table {
+  width: 100%; border-collapse: collapse;
+  background: var(--panel-2); border-radius: 6px; overflow: hidden;
+}
+.journey-table th, .journey-table td {
+  padding: 8px 12px; text-align: left;
+  border-bottom: 1px solid var(--border); font-size: 13px;
+}
+
+/* Journey cards (per-journey map + clips) */
+.journey-card {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin: 16px 0;
+  overflow: hidden;
+}
+/* Tighter spacing for collapsed cards so a long day reads as a list. */
+.journey-card.collapsible { margin: 6px 0; }
+.journey-header {
+  display: flex; align-items: center; gap: 12px;
+  padding: 10px 14px;
+  flex-wrap: wrap;
+}
+.journey-card.collapsible .journey-header {
+  cursor: pointer;
+  user-select: none;
+  transition: background 120ms ease;
+}
+.journey-card.collapsible .journey-header:hover {
+  background: rgba(255, 255, 255, 0.025);
+}
+.journey-header .caret {
+  color: var(--muted);
+  font-size: 12px;
+  width: 12px;
+  flex: 0 0 auto;
+}
+/* "Select all" tick in the journey/stop card header. */
+.journey-header .journey-check {
+  flex: 0 0 auto;
+  margin: 0;
+  cursor: pointer;
+  accent-color: var(--accent);
+}
+.journey-body {
+  border-top: 1px solid var(--border);
+}
+.journey-body[hidden] { display: none; }
+.journey-header strong { font-size: 14px; }
+.journey-title {
+  display: inline-flex; align-items: center; gap: 8px;
+  flex-wrap: wrap; max-width: 100%;
+}
+.journey-arrow { color: var(--muted); }
+.start-label, .end-label, .stop-label {
+  overflow-wrap: anywhere;
+}
+.journey-header .journey-times { color: var(--text); font-size: 13px; }
+.journey-header .journey-meta {
+  color: var(--muted); font-size: 12px;
+  margin-left: auto;
+}
+.journey-map {
+  height: 560px;
+  border-bottom: 1px solid var(--border);
+}
+.journey-map .leaflet-interactive { cursor: pointer; }
+.journey-card .clip-grid { padding: 12px; }
+
+.stop-card .journey-header { background: rgba(241, 196, 15, 0.05); }
+.stop-card .stop-icon { font-size: 14px; color: var(--warn); }
+.stop-card .journey-map { height: 200px; }
+
+.stop-banner {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 14px;
+  background: var(--panel);
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+  margin: 8px 0;
+  color: var(--muted);
+  font-size: 12px;
+  flex-wrap: wrap;
+}
+.stop-banner .stop-icon { font-size: 14px; }
+.stop-banner strong { color: var(--text); }
+.stop-banner .stop-where { font-family: "SF Mono", monospace; }
+.stop-banner .stop-when { margin-left: auto; }
+
+.other-clips-head {
+  margin: 20px 0 8px;
+  font-size: 14px;
+  color: var(--muted);
+  font-weight: 500;
+}
+
+#pagination {
+  display: flex; gap: 8px; justify-content: center;
+  padding: 16px;
+}
+
+/* Page header — used by both archive and downloads views.
+ * The h2 carries the page title; .view-header allows future
+ * trailing widgets (counts, controls) via flex slots. */
+.view-header {
+  display: flex; align-items: baseline; gap: 12px;
+  margin: 4px 0 16px;
+}
+.view-header h2 {
+  margin: 0;
+  flex: 1;
+  font-size: 24px;
+  font-weight: 700;
+  letter-spacing: -0.015em;
+}
+.badge {
+  background: var(--panel-2); border: 1px solid var(--border);
+  padding: 4px 10px; border-radius: 999px;
+  color: var(--muted); font-size: 12px;
+}
+.current {
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: 8px; padding: 16px; margin-bottom: 16px;
+}
+.current .bar {
+  height: 8px; background: var(--panel-2); border-radius: 4px;
+  overflow: hidden; margin-top: 8px;
+}
+.current .bar > div {
+  height: 100%; background: var(--accent); width: 0%;
+  transition: width 0.2s;
+}
+.queue-filters {
+  display: flex; gap: 10px; margin-bottom: 12px;
+  align-items: center; flex-wrap: wrap;
+  padding: 10px 12px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.queue-filters #q-filter {
+  flex: 1 1 220px;
+  min-width: 200px;
+}
+.filter-sep {
+  width: 1px;
+  height: 22px;
+  background: rgba(255, 255, 255, 0.12);
+  margin: 0 6px;
+  flex: 0 0 auto;
+}
+.recent-label {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 13px;
+}
+.queue-meta {
+  color: var(--muted);
+  font-size: 12px;
+  margin-bottom: 12px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.01em;
+}
+#queue { width: 100%; border-collapse: collapse; }
+#queue th.sortable {
+  cursor: pointer; user-select: none; white-space: nowrap;
+}
+#queue th.sortable:hover { color: var(--accent); }
+#queue th.sortable::after {
+  content: ""; display: inline-block; width: 0; margin-left: 4px;
+}
+#queue th.sortable.sort-asc::after { content: " \25B2"; font-size: 10px; }
+#queue th.sortable.sort-desc::after { content: " \25BC"; font-size: 10px; }
+#queue th, #queue td {
+  padding: 8px; text-align: left;
+  border-bottom: 1px solid var(--border); font-size: 13px;
+}
+#queue tbody tr:hover { background: var(--panel-2); }
+.pagination {
+  display: flex;
+  gap: 8px;
+  justify-content: center;
+  flex-wrap: wrap;
+  padding: 16px 0;
+}
+.state-pending    { color: var(--muted); }
+.state-downloading { color: var(--accent); }
+.state-done       { color: var(--ok); }
+.state-failed     { color: var(--err-text); }
+.state-gone       { color: var(--warn); }
+.order-cell { text-align: center; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+/* Downloads — accordion by day */
+.queue-day-header { gap: 12px; }
+.queue-day-header h3 {
+  font-size: 15px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.005em;
+}
+.queue-day-header .meta { flex: 0 0 auto; }
+.queue-day-header .state-breakdown {
+  flex: 1;
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  font-variant-numeric: tabular-nums;
+}
+.queue-day-header .state-breakdown span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 9px 2px 7px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.025);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.queue-day-header .state-breakdown span::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+  background: var(--muted);
+}
+.queue-day-header .state-breakdown .state-pending {
+  color: var(--muted);
+}
+.queue-day-header .state-breakdown .state-pending::before {
+  background: var(--muted);
+}
+.queue-day-header .state-breakdown .state-downloading {
+  color: var(--accent);
+  border-color: var(--accent-35);
+  background: var(--accent-08);
+}
+.queue-day-header .state-breakdown .state-downloading::before {
+  background: var(--accent);
+}
+.queue-day-header .state-breakdown .state-done {
+  color: var(--ok);
+}
+.queue-day-header .state-breakdown .state-done::before {
+  background: var(--ok);
+}
+.queue-day-header .state-breakdown .state-failed {
+  color: var(--err-text);
+  border-color: oklch(0.62 0.20 28 / 0.30);
+  background: oklch(0.62 0.20 28 / 0.06);
+}
+.queue-day-header .state-breakdown .state-failed::before {
+  background: var(--err);
+}
+.queue-day-header .state-breakdown .state-gone {
+  color: var(--warn);
+}
+.queue-day-header .state-breakdown .state-gone::before {
+  background: var(--warn);
+}
+.queue-day-header .caret { color: var(--muted); font-size: 12px; }
+.queue-day-header .qd-check { margin: 0; cursor: pointer; }
+.queue-day-header .qd-check:disabled { cursor: not-allowed; opacity: 0.4; }
+.queue-day-stale .queue-day-header h3,
+.queue-day-stale .queue-day-header .meta { opacity: 0.6; }
+.queue-day-body { padding: 8px 16px 16px; }
+
+.queue-items { width: 100%; border-collapse: collapse; }
+.queue-items th, .queue-items td {
+  padding: 6px 8px; text-align: left;
+  border-bottom: 1px solid var(--border); font-size: 13px;
+}
+.queue-items th { color: var(--muted); font-weight: 500; }
+.queue-items tbody tr:hover { background: var(--panel-2); }
+.queue-items .qi-check { cursor: pointer; }
+
+.kind-label {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 13px; color: var(--text);
+  padding: 0 6px;
+  user-select: none;
+}
+.kind-label input { margin: 0; cursor: pointer; }
+
+.kind-badge {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--muted);
+  white-space: nowrap;
+}
+/* Camera-pair badges. Front uses brand amber (headlamp), rear uses
+ * a deep teal — opposite enough on the colour wheel to read at a glance,
+ * close enough in lightness that neither dominates. Parking / event /
+ * read-only stay semantic. The text-on-fill colour for kind-R isn't the
+ * accent because saturated red would clash with kind-event. */
+.kind-badge.kind-F { color: var(--accent); border-color: var(--accent); }
+.kind-badge.kind-R {
+  color: oklch(0.76 0.10 200);
+  border-color: oklch(0.50 0.08 200);
+}
+.kind-badge.kind-parking { color: var(--warn); border-color: var(--warn); }
+.kind-badge.kind-event { color: var(--err-text); border-color: var(--err); }
+.kind-badge.kind-ro {
+  color: oklch(0.70 0.04 250);
+  border-color: oklch(0.45 0.04 250);
+}
+
+/* Modal — must sit above the sticky archive-actions bar
+ * (z-index: 1100) and the sticky exports panel (1099) so the
+ * video player isn't clipped or underlapped when a journey card
+ * happens to be expanded behind it. */
+#modal {
+  position: fixed; inset: 0; background: oklch(0.10 0.010 250 / 0.82);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 2000;
+}
+.modal-inner {
+  background: var(--panel); border-radius: 12px;
+  padding: 16px; max-width: 90vw; max-height: 90vh;
+  position: relative;
+}
+.modal-inner video { max-width: 80vw; max-height: 80vh; display: block; }
+#modal-close {
+  position: absolute; top: 8px; right: 8px;
+  background: none; border: none; font-size: 24px; color: var(--text);
+}
+.modal-nav {
+  display: flex; gap: 8px; justify-content: center;
+  margin-top: 10px;
+}
+.modal-nav button {
+  min-width: 110px;
+}
+.modal-nav button:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+#modal-toggle { min-width: 130px; }
+.modal-autoplay {
+  display: flex; align-items: center; gap: 6px;
+  color: var(--muted); font-size: 13px;
+  padding: 0 8px; user-select: none; cursor: pointer;
+}
+.modal-autoplay input { cursor: pointer; }
+
+/* Log panel */
+.log-panel {
+  margin-top: 24px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.log-panel summary {
+  padding: 10px 16px;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--muted);
+  user-select: none;
+}
+.log-panel summary:hover { color: var(--text); }
+.log-entries {
+  max-height: 300px;
+  overflow-y: auto;
+  padding: 0 16px 12px;
+  font-family: "SF Mono", "Menlo", monospace;
+  font-size: 11px;
+  line-height: 1.6;
+}
+.log-line { white-space: nowrap; }
+.log-ts { color: var(--muted); margin-right: 8px; }
+.log-msg { color: var(--text); }
+
+/* Settings */
+.settings-layout {
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  gap: 28px;
+  align-items: start;
+}
+
+.settings-sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  position: sticky;
+  top: 24px;
+  padding: 6px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.settings-nav-link {
+  padding: 8px 12px;
+  border-radius: 6px;
+  text-decoration: none;
+  color: var(--muted);
+  font-size: 13px;
+  letter-spacing: 0.005em;
+  transition: color 120ms ease, background 120ms ease;
+}
+.settings-nav-link:hover {
+  color: var(--text);
+  background: var(--panel-2);
+}
+/* Active settings nav: tinted-amber fill + accent text. The previous
+ * 2px inset side-stripe was an absolute-ban anti-pattern (audit flag);
+ * this treatment is now consistent with the mobile pill rail and
+ * reads as an obvious "current" state without the stripe. */
+.settings-nav-link.active {
+  color: var(--accent);
+  background: var(--accent-10);
+  font-weight: 500;
+}
+
+.settings-pane {
+  position: relative;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 28px 32px;
+  min-height: 480px;
+}
+
+.settings-pane h3 {
+  margin: 0 0 18px;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text);
+  letter-spacing: -0.005em;
+}
+.settings-pane h3 + .form-row { margin-top: 0; }
+.settings-pane h3:not(:first-child) {
+  margin-top: 36px;
+  padding-top: 24px;
+  border-top: 1px solid var(--border);
+}
+
+.settings-pane .form-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 20px;
+  max-width: 420px;
+}
+/* Checkbox rows render inline so the label sits next to the box. */
+.settings-pane .form-row:has(> input[type="checkbox"]:only-of-type),
+.settings-pane .form-row:has(> label > input[type="checkbox"]) {
+  flex-direction: row-reverse;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 10px;
+}
+
+.settings-pane label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+/* Labels paired with a checkbox read as sentences, so drop the
+ * uppercase field-metadata treatment. Covers both DOM shapes:
+ * label-as-sibling (renderField) and label-wraps-input
+ * (renderSecuritySection). */
+.settings-pane .form-row:has(> input[type="checkbox"]:only-of-type) > label,
+.settings-pane label:has(input) {
+  font-size: 14px;
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--text);
+}
+.settings-pane label:has(input) {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.settings-pane input[type="text"],
+.settings-pane input[type="number"],
+.settings-pane input[type="password"],
+.settings-pane select {
+  font-size: 14px;
+  padding: 8px 10px;
+  width: 100%;
+}
+.settings-pane input:focus-visible,
+.settings-pane select:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-18);
+}
+
+.settings-pane input[type="checkbox"] {
+  accent-color: var(--accent);
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  cursor: pointer;
+}
+
+.settings-pane .hint {
+  font-size: 12px;
+  color: var(--muted);
+  margin: 6px 0 0;
+  max-width: 60ch;
+  line-height: 1.55;
+}
+.settings-pane .hint.ok { color: var(--ok); }
+.settings-pane .hint.bad { color: var(--err-text); }
+
+.settings-pane button {
+  font-size: 13px;
+  min-width: 80px;
+}
+.settings-pane button#pw-save,
+.settings-pane button#restart-now {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent);
+  font-weight: 600;
+}
+.settings-pane button#pw-save:hover,
+.settings-pane button#restart-now:hover {
+  filter: brightness(1.06);
+}
+.settings-pane button#rotate-secret {
+  background: transparent;
+  color: var(--err-text);
+  border-color: oklch(0.62 0.20 28 / 0.40);
+}
+.settings-pane button#rotate-secret:hover {
+  background: oklch(0.62 0.20 28 / 0.08);
+  border-color: var(--err);
+}
+
+/* Read-only system block */
+.settings-pane dl.readonly {
+  display: grid;
+  grid-template-columns: 200px 1fr;
+  gap: 10px 24px;
+  margin: 0 0 18px;
+  padding: 16px 20px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 13px;
+}
+.settings-pane dl.readonly dt {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  align-self: center;
+}
+.settings-pane dl.readonly dd {
+  margin: 0;
+  color: var(--text);
+  font-family: "SF Mono", "Menlo", monospace;
+  font-size: 13px;
+}
+
+.settings-footer {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  margin: 28px -32px -28px;
+  padding: 14px 32px;
+  background: var(--panel);
+  border-top: 1px solid var(--border);
+  border-radius: 0 0 10px 10px;
+  z-index: 10;
+}
+.settings-footer #settings-pending-summary {
+  flex: 1;
+  font-size: 13px;
+  color: var(--accent);
+  font-weight: 500;
+}
+.settings-footer .primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent);
+  font-weight: 600;
+}
+.settings-footer .primary:hover { filter: brightness(1.06); }
+
+.restart-required-chip {
+  display: inline-block;
+  padding: 2px 7px;
+  margin-left: 8px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--warn);
+  background: rgba(241, 196, 15, 0.08);
+  border: 1px solid rgba(241, 196, 15, 0.35);
+  border-radius: 3px;
+  vertical-align: middle;
+}
+
+.banner-restart {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  padding: 10px 20px;
+  background: rgba(241, 196, 15, 0.12);
+  border-bottom: 1px solid rgba(241, 196, 15, 0.45);
+  color: var(--warn);
+  text-align: center;
+  font-size: 13px;
+  font-weight: 500;
+  z-index: 100;
+}
+
+/* ============================================================
+ * Responsive adaptations
+ *
+ * Three content-driven breakpoints, picked from where the
+ * desktop layout actually breaks rather than from device classes:
+ *   1024px  shrink chrome, reclaim padding from the map cards
+ *    720px  header wraps; settings sidebar becomes a top pill rail;
+ *           sticky bars stop being sticky; clip cells relax
+ *    480px  phone portrait: status pill loses its label,
+ *           clip grid pins to two columns, captions hide
+ *
+ * Plus two input-method queries (pointer/hover) that apply at any
+ * size, because a touch laptop at 1366px still needs 44px targets.
+ * ============================================================ */
+
+/* Coarse pointer: floor every standard hit-area at 44px without
+ * resizing the visible glyph. Keeps the desktop density unchanged
+ * for mouse users. */
+@media (pointer: coarse) {
+  .icon-btn { width: 44px; height: 44px; }
+  .settings-link { width: 44px; height: 44px; }
+  nav a { padding: 10px 14px; }
+  #logout { min-height: 36px; padding: 8px 14px; }
+  .settings-nav-link { padding: 12px 14px; }
+  .settings-pane button { min-height: 36px; }
+  .cancel-btn { min-width: 36px; min-height: 36px; padding: 0 10px; }
+  .modal-nav button { min-height: 44px; }
+  #modal-close {
+    width: 40px; height: 40px;
+    border-radius: 8px;
+    font-size: 22px;
+  }
+  .day-header { padding: 16px 18px; }
+  #pagination button,
+  .pagination button { min-width: 44px; min-height: 44px; }
+}
+
+/* No real hover: kill the hover-bound surface changes so they
+ * don't latch on tap and look stuck. */
+@media (hover: none) {
+  .day:hover { border-color: var(--border); }
+  .day-header:hover { background: transparent; }
+  .journey-card.collapsible .journey-header:hover { background: transparent; }
+  #queue tbody tr:hover,
+  .queue-items tbody tr:hover { background: transparent; }
+  .settings-nav-link:hover { color: var(--muted); background: transparent; }
+  .settings-nav-link.active:hover { color: var(--text); background: var(--panel-2); }
+  .settings-link:hover { color: var(--muted); background: transparent; }
+  .exports-toggle:hover { color: var(--muted); background: transparent; }
+  .icon-btn:hover { background: var(--panel-2); }
+  button:hover { background: var(--panel-2); }
+  .clip-pair:hover .label { opacity: 0.75; }
+}
+
+/* === <= 1024px : small laptops, tablet landscape === */
+@media (max-width: 1024px) {
+  main { padding: 20px 16px; }
+  .journey-map { height: 420px; }
+  #map { height: 280px; }
+}
+
+/* === <= 720px : tablet portrait, large phones === */
+@media (max-width: 720px) {
+  main { padding: 16px 12px; }
+
+  /* Header reorders: brand + actions on row 1, nav on its own row.
+   * The spacer (which was eating 1900px on desktop) is dropped, and
+   * nav links stretch so the two tabs are equal-weight thumb targets. */
+  #app header {
+    flex-wrap: wrap;
+    gap: 8px 10px;
+    padding: 10px 14px;
+    padding-left: max(14px, env(safe-area-inset-left));
+    padding-right: max(14px, env(safe-area-inset-right));
+  }
+  #app header > .spacer { display: none; }
+  #app header h1 { flex: 0 1 auto; margin-right: auto; }
+  #app header nav {
+    order: 10;
+    flex: 1 1 100%;
+    display: flex;
+    gap: 4px;
+  }
+  nav a { flex: 1; text-align: center; }
+
+  /* Filter rows: compact padding, drop the spacer so wrap is even. */
+  .filters,
+  .queue-filters,
+  .archive-actions { padding: 10px; }
+  .filters .spacer,
+  .archive-actions .spacer,
+  .archive-filters .spacer { display: none; }
+
+  /* Sticky bars stop earning their keep on a short viewport. */
+  .archive-actions {
+    position: static;
+    box-shadow: none;
+  }
+  .exports-panel {
+    position: static;
+    max-height: none;
+  }
+
+  /* Settings: collapse to one column. The vertical sidebar
+   * becomes a horizontally-scrolling pill rail so all sections
+   * remain one tap away without a hamburger detour. The desktop's
+   * inset accent stripe is swapped for a tinted fill at this
+   * breakpoint, which also clears the side-stripe anti-pattern
+   * the audit flagged. */
+  .settings-layout {
+    grid-template-columns: 1fr;
+    gap: 14px;
+  }
+  .settings-sidebar {
+    position: static;
+    top: auto;
+    flex-direction: row;
+    overflow-x: auto;
+    overflow-y: hidden;
+    gap: 4px;
+    padding: 6px;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+    mask-image: linear-gradient(
+      to right,
+      transparent 0,
+      black 16px,
+      black calc(100% - 16px),
+      transparent 100%
+    );
+  }
+  .settings-sidebar::-webkit-scrollbar { display: none; }
+  .settings-nav-link {
+    flex: 0 0 auto;
+    white-space: nowrap;
+    padding: 8px 14px;
+  }
+  .settings-nav-link.active {
+    box-shadow: none;
+    background: var(--accent-10);
+    color: var(--accent);
+  }
+  .settings-pane {
+    padding: 20px 18px;
+    min-height: 320px;
+  }
+  .settings-footer {
+    margin: 20px -18px -20px;
+    padding: 12px 18px;
+  }
+  .settings-pane dl.readonly {
+    grid-template-columns: 1fr;
+    gap: 4px 0;
+    padding: 14px 16px;
+  }
+  .settings-pane dl.readonly dt { margin-top: 10px; }
+  .settings-pane dl.readonly dt:first-of-type { margin-top: 0; }
+
+  /* Day rows: the meta block wraps below the date instead of
+   * fighting it for one row. */
+  .day-header {
+    flex-wrap: wrap;
+    gap: 4px 12px;
+    padding: 14px;
+  }
+  .day-header h3 { flex: 1 1 100%; }
+  .day-body { padding: 14px; }
+
+  /* Journey + stop cards. */
+  .journey-header {
+    padding: 12px;
+    gap: 8px 10px;
+  }
+  .journey-header .journey-meta {
+    margin-left: 0;
+    flex: 1 1 100%;
+  }
+  .journey-map { height: 320px; }
+  .stop-card .journey-map { height: 180px; }
+  #map { height: 240px; }
+  .journey-card .clip-grid { padding: 10px; }
+
+  /* Clip grid: tighter floor so two thumbs fit at ~375px. */
+  .clip-grid {
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+    gap: 8px;
+  }
+  .clip-pair { padding: 6px; }
+
+  /* Downloads queue is 8 columns wide. Rather than reshuffle into
+   * a card layout (and lose column alignment), let the table
+   * scroll horizontally inside its day body. The table keeps its
+   * natural density for users who can scroll; the day header,
+   * filters, and meta above it remain pinned to the page. */
+  .queue-day-body { padding: 8px 10px 12px; }
+  .queue-day-body table.queue-items {
+    display: block;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    width: 100%;
+  }
+  .exports-table-wrap,
+  .exports-panel { overflow-x: auto; }
+  .exports-table { min-width: 520px; }
+
+  /* Downloads breakdown pills wrap below the date instead of
+   * crowding the row. */
+  .queue-day-header { flex-wrap: wrap; }
+  .queue-day-header h3 { flex: 1 1 auto; }
+  .queue-day-header .state-breakdown {
+    flex: 1 1 100%;
+    justify-content: flex-start;
+    margin-top: 4px;
+  }
+
+  /* Modal: respect safe-area, cap video by small-vh so the close
+   * button stays in reach above the iOS chrome. */
+  .modal-inner {
+    padding: 12px;
+    padding-top: max(12px, env(safe-area-inset-top));
+    max-width: calc(100vw - 16px);
+  }
+  .modal-inner video {
+    max-width: calc(100vw - 24px);
+    max-height: 60svh;
+  }
+  .modal-nav {
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .modal-nav button {
+    flex: 1 1 calc(50% - 6px);
+    min-width: 0;
+  }
+
+  /* Restart banner sits above a possible iOS notch. */
+  .banner-restart {
+    padding-top: max(10px, env(safe-area-inset-top));
+  }
+
+  /* Login form is fluid below its desktop minimum. */
+  #login-form {
+    min-width: 0;
+    width: min(360px, 100% - 32px);
+    padding: 24px;
+  }
+}
+
+/* === <= 480px : phone portrait === */
+@media (max-width: 480px) {
+  main { padding: 12px 10px; }
+
+  #app header { padding: 8px 10px; }
+  #app header h1 { font-size: 16px; }
+
+  /* The "Dashcam offline / online" pill drops its label and
+   * becomes a coloured dot. Colour already carried the meaning;
+   * the word was redundant at thumb scale. */
+  .status {
+    font-size: 0;
+    padding: 0;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: var(--muted);
+    border: none;
+  }
+  .status.offline { background: var(--err); }
+  .status.online { background: var(--ok); }
+
+  .day-header h3 { font-size: 14px; }
+  .day-header .meta { font-size: 11px; }
+  .journey-title { font-size: 13px; }
+
+  /* Two-up clip grid. The 16:9 thumbs stay legible at ~170px. */
+  .clip-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px;
+  }
+  /* The filename caption is debug ergonomics, not user ergonomics.
+   * Already faded on desktop; on phone it fights the time label
+   * for every pixel. Hide it. */
+  .clip-pair .label { display: none; }
+
+  /* Action buttons wrap two-up rather than overflowing. */
+  .archive-actions button {
+    flex: 1 1 calc(50% - 4px);
+  }
+
+  /* Pagination chips: thumb-sized. */
+  #pagination button,
+  .pagination button {
+    min-width: 44px;
+    min-height: 44px;
+  }
+}
+
+/* === Very narrow / iPhone SE class (<= 380px) === */
+@media (max-width: 380px) {
+  main { padding: 10px 8px; }
+  .day-header { padding: 12px 10px; }
+  .journey-header { padding: 10px; }
+  .clip-grid { gap: 4px; }
+  .filters,
+  .archive-actions,
+  .queue-filters { padding: 8px; }
+}
+
+/* ============================================================
+ * Hardening
+ * ============================================================ */
+
+/* Hit-area floor for the smallest visible controls. Even with a
+ * mouse, a 24x24 close button at viewport top-right is a frequent
+ * miss. The visible glyph stays the same; a transparent padded
+ * area extends the click zone. */
+.cancel-btn {
+  min-width: 28px;
+  min-height: 28px;
+  padding: 0 6px;
+}
+#modal-close {
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+  font-size: 22px;
+  line-height: 1;
+}
+#modal-close:hover { background: rgba(255, 255, 255, 0.06); }
+
+/* Flex children that hold long strings need min-width: 0 so they
+ * can shrink below their natural content size and let the text's
+ * own overflow-wrap take over. Without this, a 90-character
+ * journey label pushes its row out instead of wrapping. */
+.journey-title,
+.day-header .meta,
+.clip-pair .label,
+#app header h1 {
+  min-width: 0;
+}
+
+/* Reduced motion. Vestibular-disorder accessibility (WCAG 2.3.3).
+ * The repeating animations — the sync spinner and the red-pulse
+ * pause halo — are the worst offenders; both communicate state
+ * the user has another channel for (icon shape, button colour),
+ * so we stop them outright and shorten the few one-shot
+ * transitions that remain. The selection-flash and exports-flash
+ * are kept as instant outlines so users still get feedback. */
+@media (prefers-reduced-motion: reduce) {
+  .icon-btn.active #sync-icon-sync:not([hidden]) { animation: none; }
+  .icon-btn.paused {
+    animation: none;
+    box-shadow: 0 0 0 1px var(--err);
+  }
+  .clip-pair.flash { animation: none; }
+  .exports-panel.just-submitted { animation: none; }
+  .skip-link { transition: none; }
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+  }
+}

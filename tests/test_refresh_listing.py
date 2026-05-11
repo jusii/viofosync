@@ -1,0 +1,149 @@
+"""Tests for SyncWorker._refresh_listing_and_reconcile.
+
+Pinning the regression: during a long sync drain the queue used
+to only refresh once per cycle, so clips the dashcam recorded
+mid-drain didn't appear in the UI's queue until the cycle
+ended. The helper is now called between every successful
+download to keep the queue current.
+"""
+from __future__ import annotations
+
+import datetime as _dt
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from web.db import Database
+from web.services.hub import Hub
+from web.services.sync_worker import SyncWorker
+
+
+class _Rec:
+    """Minimal Recording stand-in — only the fields reconcile reads."""
+
+    def __init__(
+        self, filename: str, *,
+        filepath: str = "/DCIM/Movie",
+        size: int = 1000,
+    ) -> None:
+        self.filename = filename
+        self.filepath = filepath
+        self.size = size
+        self.datetime = _dt.datetime(2026, 5, 8, 12, 0, 0)
+
+
+def _make_snap(*, sync_ro_only: bool = False):
+    snap = MagicMock()
+    snap.address = "192.168.1.230"
+    snap.use_html_listing = True
+    snap.grouping = "daily"
+    snap.recordings = "/tmp"
+    snap.sync_ro_only = sync_ro_only
+    return snap
+
+
+@pytest.fixture
+def db(tmp_path: Path) -> Database:
+    return Database(str(tmp_path / ".viofosync.db"))
+
+
+def _queue_rows(db: Database) -> list[tuple[str, str]]:
+    with db.conn() as c:
+        rows = c.execute(
+            "SELECT filename, state FROM download_queue "
+            "ORDER BY filename"
+        ).fetchall()
+    return [(r["filename"], r["state"]) for r in rows]
+
+
+# ---- happy path ----
+
+async def test_refresh_enqueues_new_clips(db: Database) -> None:
+    provider = MagicMock()
+    provider.get.return_value = _make_snap()
+    hub = Hub()  # no clients connected; broadcast is a no-op
+    worker = SyncWorker(db, provider, hub)
+
+    listing = [_Rec("A.MP4"), _Rec("B.MP4")]
+    with patch.object(worker, "_fetch_listing", return_value=listing), \
+         patch.object(worker, "_present_filenames", return_value=[]):
+        ok = await worker._refresh_listing_and_reconcile()
+
+    assert ok is True
+    assert _queue_rows(db) == [
+        ("A.MP4", "pending"),
+        ("B.MP4", "pending"),
+    ]
+
+
+async def test_refresh_picks_up_clips_added_between_calls(
+    db: Database,
+) -> None:
+    """The actual scenario: a sync is running, the user/dashcam
+    is recording, and a new clip lands on the SD card during the
+    sync. The second call sees it."""
+    provider = MagicMock()
+    provider.get.return_value = _make_snap()
+    hub = Hub()
+    worker = SyncWorker(db, provider, hub)
+
+    # First listing: only A
+    with patch.object(worker, "_fetch_listing",
+                      return_value=[_Rec("A.MP4")]), \
+         patch.object(worker, "_present_filenames", return_value=[]):
+        await worker._refresh_listing_and_reconcile()
+    assert _queue_rows(db) == [("A.MP4", "pending")]
+
+    # ...time passes, dashcam records B...
+
+    # Second listing: A and B. B is new, A is unchanged.
+    with patch.object(worker, "_fetch_listing",
+                      return_value=[_Rec("A.MP4"), _Rec("B.MP4")]), \
+         patch.object(worker, "_present_filenames", return_value=[]):
+        await worker._refresh_listing_and_reconcile()
+    assert _queue_rows(db) == [
+        ("A.MP4", "pending"),
+        ("B.MP4", "pending"),
+    ]
+
+
+async def test_refresh_filters_by_ro_only_when_setting_on(
+    db: Database,
+) -> None:
+    provider = MagicMock()
+    provider.get.return_value = _make_snap(sync_ro_only=True)
+    hub = Hub()
+    worker = SyncWorker(db, provider, hub)
+
+    listing = [
+        _Rec("DRIVE.MP4", filepath="/DCIM/Movie"),
+        _Rec("LOCK.MP4", filepath="/DCIM/Movie/RO"),
+    ]
+    with patch.object(worker, "_fetch_listing", return_value=listing), \
+         patch.object(worker, "_present_filenames", return_value=[]):
+        await worker._refresh_listing_and_reconcile()
+    assert _queue_rows(db) == [("LOCK.MP4", "pending")]
+
+
+# ---- failure handling ----
+
+async def test_refresh_returns_false_on_listing_exception(
+    db: Database,
+) -> None:
+    """Listing failures must be soft — caller decides what to do
+    with the False result. Critically, no exception leaks out so
+    the surrounding drain loop can keep running."""
+    provider = MagicMock()
+    provider.get.return_value = _make_snap()
+    hub = Hub()
+    worker = SyncWorker(db, provider, hub)
+
+    def _boom():
+        raise OSError("dashcam unreachable")
+
+    with patch.object(worker, "_fetch_listing", side_effect=_boom):
+        ok = await worker._refresh_listing_and_reconcile()
+    assert ok is False
+    # Queue is untouched.
+    assert _queue_rows(db) == []

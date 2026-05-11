@@ -13,3 +13,24 @@ tmp
 .DS_Store
 
 
+.venv/*
+recordings/*
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+
+# App state / secrets
+*.db
+*.db-wal
+*.db-shm
+*.env
+viofosync.env
+config.json
+
+# Editor
+.venv/
+docs/*
+CLAUDE.md
