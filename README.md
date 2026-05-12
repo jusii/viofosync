@@ -4,6 +4,8 @@ Self-hosted web app for syncing, browsing, and exporting recordings from a Viofo
 
 > **v2 is a full rewrite.** v1 was a cron-driven CLI based on [BlackVueSync](https://github.com/acolomba/BlackVueSync). v2 uses the same dashcam protocol but ships a web UI, journey-detected GPS maps, ffmpeg exports, JSON-backed settings, a first-run setup wizard, and a UI-driven download manager. The v1 cron CLI is preserved on the `main` branch.
 
+![Download manager](screenshots/download_manager.png)
+
 ## Features
 
 - **Archive browser** — view clips grouped by day, front/rear pairs, on-demand thumbnails, in-browser playback, kind filters (Driving / Parking / Read-only), GPS-maps toggle for low-bandwidth browsing.
