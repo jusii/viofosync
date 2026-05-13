@@ -22,6 +22,7 @@ logic with the CLI.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import logging
 import os
 import socket
@@ -29,6 +30,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Optional
 
 import viofosync_lib as vfs
@@ -42,6 +44,12 @@ from .hub import Hub
 log = logging.getLogger("viofosync.sync_worker")
 
 BACKOFF_STEPS = [10, 30, 120, 600]  # seconds
+
+
+def _now_ms() -> int:
+    """Current time in milliseconds since the epoch. Used for
+    the per-stage timing columns the A/B benchmarking reads."""
+    return int(time.time() * 1000)
 
 
 def _filter_ro_only(listing):
@@ -278,6 +286,12 @@ class SyncWorker:
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._running_cycle = False
         self._current_filename: Optional[str] = None
+        # Single-thread executor for post-download work (GPS
+        # extract, dashcam delete, mark_done). Strict FIFO keeps
+        # write ordering simple and avoids disk contention from
+        # parallel MP4 atom parses. Lazily created in start().
+        self._tail_executor: Optional[ThreadPoolExecutor] = None
+        self._tail_futures: set[Future] = set()
 
     # ---- lifecycle ----
 
@@ -299,6 +313,11 @@ class SyncWorker:
                     "call bind_loop() during app startup"
                 )
         self._stop.clear()
+        if self._tail_executor is None:
+            self._tail_executor = ThreadPoolExecutor(
+                max_workers=1,
+                thread_name_prefix="viofo-tail",
+            )
         # Schedule the coroutine onto the captured loop — works
         # both from the loop thread and from threadpool handlers.
         self._task = asyncio.run_coroutine_threadsafe(
@@ -319,7 +338,6 @@ class SyncWorker:
         if self._task is not None:
             # self._task may be an asyncio.Task or a
             # concurrent.futures.Future — wrap uniformly.
-            import concurrent.futures
             try:
                 if isinstance(self._task, concurrent.futures.Future):
                     await asyncio.wrap_future(self._task)
@@ -330,6 +348,17 @@ class SyncWorker:
                     self._task.cancel()
                 except Exception:
                     pass
+        # Drain the tail executor: let in-flight GPS extracts /
+        # dashcam deletes finish so we don't leave half-written
+        # .gpx sidecars on disk. The executor is short-lived
+        # work; this should complete in <2 s typically.
+        if self._tail_executor is not None:
+            ex = self._tail_executor
+            self._tail_executor = None
+            try:
+                ex.shutdown(wait=True, cancel_futures=False)
+            except Exception:  # pragma: no cover
+                log.exception("tail executor shutdown failed")
 
     def kick(self) -> None:
         """Trigger an immediate cycle (e.g. user clicked Start
@@ -478,6 +507,7 @@ class SyncWorker:
         return True
 
     async def _cycle(self) -> bool:
+        cycle_start = time.monotonic()
         reachable = await self._probe()
         await self.hub.broadcast({
             "type": "dashcam_online" if reachable else "dashcam_offline",
@@ -499,6 +529,7 @@ class SyncWorker:
         # loop re-checks ``next_pending`` so a priority update
         # mid-cycle takes effect immediately.
         did_any = False
+        drained = 0
         while not self._stop.is_set():
             if self._paused.is_set():
                 break
@@ -524,12 +555,19 @@ class SyncWorker:
                 # Transient failure. Loop continues with next
                 # pending item, which may well succeed.
                 continue
+            drained += 1
             # Refresh listing between downloads so clips the
             # dashcam recorded during this transfer show up in
             # the queue before we pick the next pending one.
             # Best-effort: a transient listing failure here
             # leaves the existing queue intact.
             await self._refresh_listing_and_reconcile()
+
+        # Let the tail executor finish before the post-cycle scan:
+        # ``scanner.scan`` reads has_gpx off disk to set clip_index
+        # flags, and the dashcam-delete sink events shouldn't lag
+        # past sync_done.
+        await self._await_tails()
 
         # Re-index + sweep thumbs so new clips appear in the UI.
         # Both calls are idempotent; the did_any gate is just to
@@ -562,6 +600,12 @@ class SyncWorker:
             "ok": True,
             "queue": q.list_all(self.db, limit=200),
         })
+        cycle_duration = time.monotonic() - cycle_start
+        log.info(
+            "cycle done: drained=%d duration=%.1fs pipeline=%s",
+            drained, cycle_duration,
+            self._provider.get().pipeline_post_download,
+        )
         return did_any
 
     def _fetch_listing(self):
@@ -583,35 +627,49 @@ class SyncWorker:
     # ---- single item download ----
 
     async def _download_one(self, item: q.QueueItem) -> bool:
+        """Download one queued file and hand its post-download
+        tail (GPS extract → dashcam delete → mark_done) to the
+        tail executor when ``pipeline_post_download`` is on.
+
+        The download itself stays N=1 because the dashcam's Wi-Fi
+        is the wall — but the tail used to block the worker from
+        starting the next download. Moving it off the critical
+        path means file N+1's bytes start flowing while file N's
+        sidecar is still being parsed.
+
+        When ``pipeline_post_download`` is off, the tail runs
+        inline on the same executor thread, restoring legacy
+        behaviour for A/B benchmarking.
+        """
         snap = self._provider.get()
         q.mark_downloading(self.db, item.id)
         self._cancel_current.clear()
         loop = asyncio.get_running_loop()
         sink = WebSink(self.hub, loop)
+        base = f"http://{snap.address}"
 
-        def _blocking():
-            """Runs on an executor thread. Synthesises the
-            Recording tuple ``download_file`` expects."""
-            import datetime as _dt
-            # get_group_name wants a datetime; if the queue row
-            # didn't capture one, now() is a safe fallback.
-            recorded = (
-                _dt.datetime.fromtimestamp(item.recorded_at)
-                if item.recorded_at
-                else _dt.datetime.now()
-            )
-            group_name = vfs.get_group_name(
-                recorded, snap.grouping
-            )
-            rec = vfs.Recording(
-                filename=item.filename,
-                filepath=item.source_dir,
-                size=item.remote_size,
-                timecode=None,
-                datetime=recorded,
-                attr=None,
-            )
-            base = f"http://{snap.address}"
+        import datetime as _dt
+        # get_group_name wants a datetime; if the queue row
+        # didn't capture one, now() is a safe fallback.
+        recorded = (
+            _dt.datetime.fromtimestamp(item.recorded_at)
+            if item.recorded_at
+            else _dt.datetime.now()
+        )
+        group_name = vfs.get_group_name(recorded, snap.grouping)
+        rec = vfs.Recording(
+            filename=item.filename,
+            filepath=item.source_dir,
+            size=item.remote_size,
+            timecode=None,
+            datetime=recorded,
+            attr=None,
+        )
+
+        def _blocking_download():
+            """Run on the default executor thread. Returns
+            (ok, dest_path, err). ``dest_path`` is only valid
+            when ``ok`` is True."""
             try:
                 ok, _ = vfs.download_file_with(
                     base, rec, snap.recordings,
@@ -621,55 +679,161 @@ class SyncWorker:
                     max_attempts=snap.download_attempts,
                     socket_timeout=snap.timeout,
                 )
-                # download_file_with() doesn't pull GPX, so the worker
-                # has to do it here when the setting is on.
-                if ok:
-                    dest_path = vfs.get_filepath(
-                        snap.recordings, group_name, item.filename,
-                    )
-                    # Adopt the actual byte count as the queue's
-                    # remote_size (the HTML listing rounds to MB).
-                    _refresh_queue_size(self.db, item, dest_path)
-                    if snap.gps_extract:
-                        try:
-                            vfs.extract_gps_data(dest_path)
-                        except Exception as e:
-                            # Clips recorded without GPS lock have no
-                            # track to extract; not a download failure.
-                            log.info(
-                                "gpx extract failed for %s: %s",
-                                item.filename, e,
-                            )
-                    _maybe_delete_from_dashcam(
-                        item=item,
-                        dest_path=dest_path,
-                        delete_enabled=snap.delete_after_download,
-                        base_url=base,
-                        sink=sink,
-                    )
-                return ok, None
+                if not ok:
+                    return False, None, None
+                dest_path = vfs.get_filepath(
+                    snap.recordings, group_name, item.filename,
+                )
+                return True, dest_path, None
             except Exception as e:
-                return False, str(e)
+                return False, None, str(e)
 
-        ok, err = await loop.run_in_executor(None, _blocking)
-
-        if ok:
-            q.mark_done(self.db, item.id)
-            return True
-
-        new_state = q.mark_transient_failure(
-            self.db,
-            item.id,
-            err or "unknown",
-            snap.max_attempts,
+        self._set_timing(item.id, download_started_at=_now_ms())
+        ok, dest_path, err = await loop.run_in_executor(
+            None, _blocking_download
         )
-        await self.hub.broadcast({
-            "type": "item_state_change",
-            "filename": item.filename,
-            "state": new_state,
-            "error": err,
-        })
-        # If we gave up permanently, keep going; otherwise,
-        # yield to let the reachability re-probe decide
-        # whether to continue this cycle.
-        return False
+        self._set_timing(item.id, download_finished_at=_now_ms())
+
+        if not ok:
+            new_state = q.mark_transient_failure(
+                self.db,
+                item.id,
+                err or "unknown",
+                snap.max_attempts,
+            )
+            await self.hub.broadcast({
+                "type": "item_state_change",
+                "filename": item.filename,
+                "state": new_state,
+                "error": err,
+            })
+            return False
+
+        # Download succeeded. Run the post-download tail either
+        # on a dedicated executor (pipelined: worker returns now
+        # and starts the next download immediately) or inline
+        # (legacy timing for the A/B comparison).
+        if (snap.pipeline_post_download
+                and self._tail_executor is not None):
+            self._set_timing(item.id, tail_submitted_at=_now_ms())
+            fut = self._tail_executor.submit(
+                self._run_tail, item, dest_path, snap, sink,
+            )
+            self._tail_futures.add(fut)
+            fut.add_done_callback(self._tail_futures.discard)
+        else:
+            self._set_timing(item.id, tail_submitted_at=_now_ms())
+            self._run_tail(item, dest_path, snap, sink)
+        return True
+
+    # ---- tail stage ----
+
+    def _run_tail(
+        self,
+        item: q.QueueItem,
+        dest_path: str,
+        snap,
+        sink: "WebSink",
+    ) -> None:
+        """Post-download work for one file. Runs either on the
+        tail executor or inline; either way, the download itself
+        has already succeeded by the time we get here, so a
+        failure in any step here logs but never re-queues the
+        download (it's on disk; a re-download would waste Wi-Fi).
+        """
+        t_start = time.perf_counter()
+        log.debug("tail begin: %s", item.filename)
+        try:
+            try:
+                _refresh_queue_size(self.db, item, dest_path)
+            except Exception:  # pragma: no cover — DB hiccup
+                log.exception(
+                    "refresh_queue_size failed for %s",
+                    item.filename,
+                )
+            t_rqs = time.perf_counter()
+            log.debug(
+                "tail: refresh_queue_size done in %.2fs (%s)",
+                t_rqs - t_start, item.filename,
+            )
+            if snap.gps_extract:
+                try:
+                    vfs.extract_gps_data(dest_path)
+                except Exception as e:
+                    # Clips recorded without GPS lock have no
+                    # track to extract; not a download failure.
+                    log.info(
+                        "gpx extract failed for %s: %s",
+                        item.filename, e,
+                    )
+            t_gps = time.perf_counter()
+            log.debug(
+                "tail: gps done in %.2fs (%s)",
+                t_gps - t_rqs, item.filename,
+            )
+            _maybe_delete_from_dashcam(
+                item=item,
+                dest_path=dest_path,
+                delete_enabled=snap.delete_after_download,
+                base_url=f"http://{snap.address}",
+                sink=sink,
+            )
+            t_del = time.perf_counter()
+            log.debug(
+                "tail: dashcam_delete done in %.2fs (%s)",
+                t_del - t_gps, item.filename,
+            )
+            q.mark_done(self.db, item.id)
+            log.debug(
+                "tail: mark_done done in %.2fs (%s)",
+                time.perf_counter() - t_del, item.filename,
+            )
+        except Exception:
+            log.exception(
+                "post-download tail unexpected failure for %s",
+                item.filename,
+            )
+        finally:
+            try:
+                self._set_timing(
+                    item.id,
+                    tail_finished_at=_now_ms(),
+                )
+            except Exception:  # pragma: no cover
+                pass
+            log.debug(
+                "tail end: %s total=%.2fs",
+                item.filename, time.perf_counter() - t_start,
+            )
+
+    async def _await_tails(self) -> None:
+        """Block until every tail submitted during this cycle has
+        completed. Called at end-of-cycle so post-cycle scans see
+        every sidecar and queue row updated."""
+        if not self._tail_futures:
+            return
+        pending = list(self._tail_futures)
+        await asyncio.gather(
+            *(asyncio.wrap_future(f) for f in pending),
+            return_exceptions=True,
+        )
+
+    def _set_timing(self, item_id: int, **fields: int) -> None:
+        """Update timing columns on a download_queue row.
+
+        ``fields`` keys must match nullable INTEGER columns added
+        by the db migration (``download_started_at`` etc.); values
+        are ms-since-epoch. Used by the A/B benchmarking — failure
+        here must never escape into the pipeline."""
+        if not fields:
+            return
+        try:
+            cols = ", ".join(f"{k}=?" for k in fields)
+            values = list(fields.values()) + [item_id]
+            with self.db.write() as c:
+                c.execute(
+                    f"UPDATE download_queue SET {cols} WHERE id=?",
+                    values,
+                )
+        except Exception:  # pragma: no cover — DB hiccup
+            log.exception("_set_timing failed for %s", item_id)

@@ -141,6 +141,18 @@ class Database:
             "WHERE has_gpx = 1 AND gps_examined = 0"
         )
 
+        # Per-stage timings used to attribute cycle wall-clock to
+        # the download (Wi-Fi bound) vs. the post-download tail
+        # (GPS extract + dashcam delete + DB writes). Recorded in
+        # ms since the epoch; nullable so legacy rows survive.
+        for col in (
+            "download_started_at",
+            "download_finished_at",
+            "tail_submitted_at",
+            "tail_finished_at",
+        ):
+            _add_column("download_queue", col, "INTEGER")
+
     @contextmanager
     def conn(self) -> Iterator[sqlite3.Connection]:
         """Yield a connection with row-factory set.

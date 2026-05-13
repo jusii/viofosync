@@ -52,6 +52,7 @@ class Snapshot:
     sync_interval_seconds: int
     enable_scheduled_sync: bool
     sync_ro_only: bool
+    pipeline_post_download: bool
     retention_max_days: int
     retention_disk_pct: int
     retention_protect_ro: bool
@@ -220,6 +221,7 @@ class SettingsProvider:
             sync_interval_seconds=m.SYNC_INTERVAL,
             enable_scheduled_sync=m.ENABLE_SCHEDULED_SYNC,
             sync_ro_only=m.SYNC_RO_ONLY,
+            pipeline_post_download=m.PIPELINE_POST_DOWNLOAD,
             retention_max_days=m.RETENTION_MAX_DAYS,
             retention_disk_pct=m.RETENTION_DISK_PCT,
             retention_protect_ro=m.RETENTION_PROTECT_RO,
