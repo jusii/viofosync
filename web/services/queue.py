@@ -66,11 +66,12 @@ def reconcile(
     added = 0
     marked_gone = 0
     marked_done = 0
+    refreshed_source_dir = 0
     with db.write() as c:
         existing = {
             row["filename"]: dict(row)
             for row in c.execute(
-                "SELECT filename, state FROM download_queue"
+                "SELECT filename, state, source_dir FROM download_queue"
             ).fetchall()
         }
 
@@ -115,6 +116,22 @@ def reconcile(
                 continue
 
             if filename in existing:
+                # Locking a clip on the dashcam moves it from
+                # /DCIM/Movie to /DCIM/Movie/RO. The fresh listing
+                # carries the new path; refresh the queue row so
+                # the worker doesn't keep retrying the stale URL.
+                fresh_source = getattr(rec, "filepath", "") or ""
+                if (
+                    fresh_source
+                    and existing[filename]["source_dir"] != fresh_source
+                    and existing[filename]["state"] in ("pending", "failed")
+                ):
+                    c.execute(
+                        "UPDATE download_queue SET source_dir=? "
+                        "WHERE filename=?",
+                        (fresh_source, filename),
+                    )
+                    refreshed_source_dir += 1
                 continue
 
             c.execute(
@@ -158,6 +175,7 @@ def reconcile(
         "added": added,
         "marked_gone": marked_gone,
         "marked_done": marked_done,
+        "refreshed_source_dir": refreshed_source_dir,
     }
 
 

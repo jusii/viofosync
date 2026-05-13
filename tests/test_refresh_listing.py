@@ -108,6 +108,43 @@ async def test_refresh_picks_up_clips_added_between_calls(
     ]
 
 
+async def test_refresh_updates_source_dir_when_clip_moves_to_ro(
+    db: Database,
+) -> None:
+    """If the user locks a clip mid-cycle the dashcam moves it
+    from /DCIM/Movie to /DCIM/Movie/RO. The next reconcile must
+    refresh source_dir on the existing row, otherwise the
+    download worker keeps hitting the stale path and 404s out
+    its retry budget."""
+    provider = MagicMock()
+    provider.get.return_value = _make_snap()
+    hub = Hub()
+    worker = SyncWorker(db, provider, hub)
+
+    with patch.object(worker, "_fetch_listing",
+                      return_value=[_Rec("A.MP4", filepath="/DCIM/Movie")]), \
+         patch.object(worker, "_present_filenames", return_value=[]):
+        await worker._refresh_listing_and_reconcile()
+
+    with db.conn() as c:
+        row = c.execute(
+            "SELECT source_dir FROM download_queue WHERE filename='A.MP4'"
+        ).fetchone()
+    assert row["source_dir"] == "/DCIM/Movie"
+
+    # User locks the clip; dashcam re-reports it under /RO.
+    with patch.object(worker, "_fetch_listing",
+                      return_value=[_Rec("A.MP4", filepath="/DCIM/Movie/RO")]), \
+         patch.object(worker, "_present_filenames", return_value=[]):
+        await worker._refresh_listing_and_reconcile()
+
+    with db.conn() as c:
+        row = c.execute(
+            "SELECT source_dir FROM download_queue WHERE filename='A.MP4'"
+        ).fetchone()
+    assert row["source_dir"] == "/DCIM/Movie/RO"
+
+
 async def test_refresh_filters_by_ro_only_when_setting_on(
     db: Database,
 ) -> None:
