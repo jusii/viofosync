@@ -11,7 +11,7 @@ services:
       # Config directory. A template viofosync.env is seeded here on first
       # run — edit it (ADDRESS, WEB_PASSWORD, etc.) and restart to apply.
       - /path/to/config:/config
-      # Recordings + SQLite state DB. Change only the part before the colon.
+      # Recordings (dashcam archive). The state DB lives in /config, not here.
       - /path/to/recordings:/recordings:rw
 
     environment:

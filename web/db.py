@@ -1,21 +1,95 @@
 """SQLite state store for the web UI.
 
-Lives at ``$RECORDINGS/.viofosync.db`` so it travels with the
-archive volume. WAL mode so readers don't block the SyncWorker
-writer.
+Lives at ``$CONFIG_DIR/viofosync.db`` (default
+``/config/viofosync.db``) so per-write syscalls hit a fast local
+volume rather than the NAS-backed recordings mount. On first boot
+under this code path a DB at the legacy
+``$RECORDINGS/.viofosync.db`` location is copied over and the
+legacy file is renamed to ``.viofosync.db.migrated`` so an
+operator has a fallback. See ``migrate_legacy_db_path`` for the
+one-shot migration helper; ``Database.__init__`` itself does not
+run migration so tests can construct ``Database(tmp_path)`` safely.
+
+WAL mode so readers don't block the SyncWorker writer.
 
 Schema is created on first boot and migrated idempotently via
-``CREATE TABLE IF NOT EXISTS``. There is no migration system
-yet — keep columns additive and nullable.
+``CREATE TABLE IF NOT EXISTS``. There is no schema migration
+system yet — keep columns additive and nullable.
 """
 
 from __future__ import annotations
 
+import logging
 import os
+import shutil
 import sqlite3
 import threading
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Iterator
+
+
+log = logging.getLogger("viofosync.db")
+
+
+def default_db_path() -> str:
+    """Return the production location of the state DB.
+
+    Lives under CONFIG_DIR (default /config) so per-write syscalls
+    hit a fast local volume rather than the NAS-backed recordings
+    mount. The leading dot is dropped from the filename — there is
+    no longer any reason to hide the DB on its own dedicated volume.
+    """
+    return str(
+        Path(os.environ.get("CONFIG_DIR", "/config")) / "viofosync.db"
+    )
+
+
+def migrate_legacy_db_path(new_path: str) -> None:
+    """Copy a legacy ${RECORDINGS}/.viofosync.db to ``new_path`` on
+    first boot. Idempotent: no-op when the new path already exists
+    or when the legacy path is missing.
+
+    Call exactly once at startup, before constructing ``Database``.
+    Not invoked from ``Database.__init__`` so test code constructing
+    ``Database(tmp_path)`` never reads the host's RECORDINGS env var.
+    """
+    if os.path.exists(new_path):
+        return
+    legacy_recordings = os.environ.get("RECORDINGS", "/recordings")
+    legacy_path = os.path.join(legacy_recordings, ".viofosync.db")
+    if not os.path.exists(legacy_path):
+        return
+
+    os.makedirs(os.path.dirname(new_path) or ".", exist_ok=True)
+    log.info("migrating state db: %s -> %s", legacy_path, new_path)
+
+    # Main file via temp suffix + os.replace so a crash mid-copy
+    # leaves no half-written file at the destination.
+    tmp = new_path + ".part"
+    shutil.copy2(legacy_path, tmp)
+    os.replace(tmp, new_path)
+
+    # Sidecars best-effort. SQLite reconstructs from the main file
+    # alone if these are missing or stale, so a failure here is not
+    # fatal — log and continue.
+    for suffix in ("-wal", "-shm"):
+        src = legacy_path + suffix
+        if not os.path.exists(src):
+            continue
+        try:
+            shutil.copy2(src, new_path + suffix)
+        except OSError as e:
+            # best-effort: SQLite reconstructs from the main file alone
+            log.warning("could not copy %s%s: %s", legacy_path, suffix, e)
+
+    # Rename the legacy file so we don't re-migrate next boot, and
+    # so the operator has a recoverable copy. Legacy -wal / -shm
+    # files are left in place — harmless.
+    try:
+        os.replace(legacy_path, legacy_path + ".migrated")
+    except OSError as e:  # pragma: no cover — non-fatal
+        log.warning("could not rename legacy db: %s", e)
 
 
 _SCHEMA = """

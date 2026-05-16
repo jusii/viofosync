@@ -22,7 +22,7 @@ from fastapi.staticfiles import StaticFiles
 
 from . import settings as settings_mod
 from .auth import Auth
-from .db import Database
+from .db import Database, default_db_path, migrate_legacy_db_path
 from .routers import archive as archive_router
 from .routers import auth as auth_router
 from .routers import exports as exports_router
@@ -75,9 +75,9 @@ async def lifespan(app: FastAPI):
 
     provider.subscribe(_on_settings_changed)
 
-    app.state.db = Database(
-        os.path.join(s.recordings, ".viofosync.db")
-    )
+    db_path = default_db_path()
+    migrate_legacy_db_path(db_path)
+    app.state.db = Database(db_path)
 
     # Reset any rows still marked downloading/running from the
     # previous process — those owners are gone, so the workers
