@@ -118,6 +118,15 @@ def sweep(
                     (now - max_days * 86400,),
                 ).fetchall()
             ]
+        if rows:
+            # "examining" rather than "deleting": with protect_ro on,
+            # some rows here are RO-locked and will be skipped. The
+            # end-of-sweep summary reports the real deleted count.
+            log.info(
+                "retention sweep: %d clip(s) older than %d days "
+                "— examining",
+                len(rows), max_days,
+            )
         for row in rows:
             ok, reason = _eligible_by_time(
                 row, now=now, max_days=max_days, protect_ro=protect_ro,
@@ -130,6 +139,12 @@ def sweep(
             _delete_index_row(db, row["id"])
             deleted_time += 1
             _broadcast(sink, row["basename"], "time")
+            if deleted_time % 10 == 0:
+                log.info(
+                    "retention sweep: %d/%d clip(s) deleted "
+                    "(%.1f MB freed so far)",
+                    deleted_time, len(rows), bytes_freed / (1 << 20),
+                )
 
     # Phase 2: disk-pressure.
     deleted_disk = 0

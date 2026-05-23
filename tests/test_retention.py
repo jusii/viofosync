@@ -250,3 +250,75 @@ def test_sweep_disk_skips_ro_when_protected(env, monkeypatch) -> None:
             "SELECT basename FROM clip_index"
         ).fetchone()["basename"]
     assert remaining == "LOCK.MP4"
+
+
+def test_sweep_logs_examining_header_when_rows_exist(env, caplog) -> None:
+    """When there are eligible-by-time clips, sweep logs a single
+    'retention sweep: N clip(s) older than D days — examining' header
+    at INFO before starting deletions. Says 'examining' rather than
+    'deleting' because RO-protected rows are filtered inside the
+    loop, so N is the candidate count, not the eventual delete count."""
+    import logging
+    rec, db = env
+    now = 86400 * 365
+    _make_clip(rec, db, basename="A.MP4", ts=0)
+    _make_clip(rec, db, basename="B.MP4", ts=100)
+    _make_clip(rec, db, basename="C.MP4", ts=200)
+
+    with caplog.at_level(logging.INFO, logger="viofosync.retention"):
+        sweep(
+            db, str(rec), max_days=30, disk_pct=0,
+            protect_ro=False, _now=now,
+        )
+
+    headers = [
+        r.message for r in caplog.records
+        if "older than" in r.message and "examining" in r.message
+    ]
+    assert len(headers) == 1, f"expected one header log, got {headers}"
+    assert "3 clip(s) older than 30 days" in headers[0]
+
+
+def test_sweep_silent_when_no_eligible_clips(env, caplog) -> None:
+    """Steady-state: no eligible clips, no log noise."""
+    import logging
+    rec, db = env
+    now = 86400 * 365
+    _make_clip(rec, db, basename="NEW.MP4", ts=now - 3600)
+
+    with caplog.at_level(logging.INFO, logger="viofosync.retention"):
+        sweep(
+            db, str(rec), max_days=30, disk_pct=0,
+            protect_ro=False, _now=now,
+        )
+
+    assert caplog.records == [], \
+        f"sweep with no eligible clips must not log, got {[r.message for r in caplog.records]}"
+
+
+def test_sweep_logs_progress_every_10_deletions(env, caplog) -> None:
+    """A long time-phase sweep emits an INFO progress line at every
+    10th deletion, formatted with running count and MB freed."""
+    import logging
+    rec, db = env
+    now = 86400 * 365
+    # 25 eligible-by-time clips. Expect progress lines at the 10th
+    # and 20th deletions — two lines total.
+    for i in range(25):
+        _make_clip(rec, db, basename=f"OLD-{i:02d}.MP4", ts=i)
+
+    with caplog.at_level(logging.INFO, logger="viofosync.retention"):
+        sweep(
+            db, str(rec), max_days=30, disk_pct=0,
+            protect_ro=False, _now=now,
+        )
+
+    progress = [
+        r.message for r in caplog.records
+        if "/25 clip(s) deleted" in r.message
+    ]
+    assert len(progress) == 2, \
+        f"expected two progress lines, got {progress}"
+    assert progress[0].startswith("retention sweep: 10/25 clip(s) deleted")
+    assert progress[1].startswith("retention sweep: 20/25 clip(s) deleted")
+    assert "MB freed so far" in progress[0]

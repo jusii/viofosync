@@ -22,7 +22,7 @@ from fastapi.staticfiles import StaticFiles
 
 from . import settings as settings_mod
 from .auth import Auth
-from .db import Database
+from .db import Database, default_db_path, migrate_legacy_db_path
 from .routers import archive as archive_router
 from .routers import auth as auth_router
 from .routers import exports as exports_router
@@ -30,6 +30,7 @@ from .routers import progress as progress_router
 from .routers import queue as queue_router
 from .routers import settings as settings_router
 from .routers import setup as setup_router
+from .services import retention as _ret_mod
 from .services import scanner
 from .services.exporter import (
     ExportWorker,
@@ -75,9 +76,9 @@ async def lifespan(app: FastAPI):
 
     provider.subscribe(_on_settings_changed)
 
-    app.state.db = Database(
-        os.path.join(s.recordings, ".viofosync.db")
-    )
+    db_path = default_db_path()
+    migrate_legacy_db_path(db_path)
+    app.state.db = Database(db_path)
 
     # Reset any rows still marked downloading/running from the
     # previous process — those owners are gone, so the workers
@@ -90,20 +91,6 @@ async def lifespan(app: FastAPI):
         log.info("reset %d orphan download row(s) to pending", n_dl)
     if n_jobs:
         log.info("marked %d orphan export job(s) as failed", n_jobs)
-
-    # Retention sweep — sweep() emits its own INFO line when work
-    # was done, so we don't need to duplicate it here.
-    from .services import retention as _ret_mod
-    try:
-        await asyncio.to_thread(
-            _ret_mod.sweep,
-            app.state.db, s.recordings,
-            max_days=s.retention_max_days,
-            disk_pct=s.retention_disk_pct,
-            protect_ro=s.retention_protect_ro,
-        )
-    except Exception:  # pragma: no cover — non-fatal
-        log.exception("startup retention sweep failed")
 
     log.info(
         "viofosync web UI ready on http://%s:%d", s.host, s.port
@@ -134,6 +121,20 @@ async def lifespan(app: FastAPI):
             log.warning("thumb sweep failed: %s", e)
 
     app.state.initial_scan_task = asyncio.create_task(_background_scan())
+
+    async def _background_retention() -> None:
+        try:
+            await asyncio.to_thread(
+                _ret_mod.sweep,
+                app.state.db, s.recordings,
+                max_days=s.retention_max_days,
+                disk_pct=s.retention_disk_pct,
+                protect_ro=s.retention_protect_ro,
+            )
+        except Exception:  # pragma: no cover — non-fatal
+            log.exception("startup retention sweep failed")
+
+    app.state.retention_task = asyncio.create_task(_background_retention())
 
     app.state.hub = Hub()
     app.state.geocode = GeocodeService(app.state.db, provider)
@@ -173,9 +174,10 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         log.info("viofosync web UI shutting down")
-        task = getattr(app.state, "initial_scan_task", None)
-        if task is not None and not task.done():
-            task.cancel()
+        for attr in ("initial_scan_task", "retention_task"):
+            task = getattr(app.state, attr, None)
+            if task is not None and not task.done():
+                task.cancel()
         await app.state.sync_worker.stop()
         await app.state.export_worker.stop()
 
