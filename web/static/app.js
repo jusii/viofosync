@@ -2059,8 +2059,14 @@ function renderArchiveSection(pane) {
   renderField(
     pane,
     "RETENTION_DISK_PCT",
-    "Trigger cleanup at N% disk usage (0 = disabled)",
+    "Trigger cleanup at N% of filesystem (0 = disabled)",
     textInput("RETENTION_DISK_PCT", { type: "number", min: 0, max: 99 }),
+  );
+  renderField(
+    pane,
+    "RECORDINGS_QUOTA_GB",
+    "Trigger cleanup at this many GiB of recordings (0 = disabled)",
+    textInput("RECORDINGS_QUOTA_GB", { type: "number", min: 0, max: 1048576 }),
   );
   renderField(
     pane,
@@ -2072,8 +2078,13 @@ function renderArchiveSection(pane) {
   rnote.className = "hint";
   rnote.textContent =
     "Cleanup runs after each sync cycle. Files older than the day cap are " +
-    "removed; if disk usage is over the threshold, oldest clips are removed " +
-    "first until under it. Both settings are optional — leave at 0 to disable.";
+    "always removed first. The two disk-pressure triggers below are " +
+    "independent — either or both may be set. Filesystem % is the right " +
+    "choice when recordings live on a dedicated volume. GiB quota is the " +
+    "right choice when recordings sit inside a Synology share / ZFS " +
+    "dataset / other quota-bound mount where the filesystem's reported " +
+    "free space doesn't reflect the actual limit. If both are set, " +
+    "cleanup runs whenever either is breached.";
   pane.appendChild(rnote);
 }
 

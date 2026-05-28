@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+import time as _time_mod
 from typing import Optional
 
 from ..db import Database
@@ -94,6 +95,7 @@ def sweep(
     max_days: int,
     disk_pct: int,
     protect_ro: bool,
+    quota_gb: int = 0,
     sink=None,
     _now: Optional[int] = None,
 ) -> dict:
@@ -146,12 +148,14 @@ def sweep(
                     deleted_time, len(rows), bytes_freed / (1 << 20),
                 )
 
-    # Phase 2: disk-pressure.
+    # Phase 2: disk-pressure. Two independent triggers, either can
+    # be set on its own; both is fine and uses OR semantics.
     deleted_disk = 0
-    if disk_pct > 0:
+    if disk_pct > 0 or quota_gb > 0:
         deleted_disk, freed_2, protected_2 = _disk_pressure_pass(
             db, recordings,
             disk_pct=disk_pct,
+            quota_gb=quota_gb,
             protect_ro=protect_ro,
             sink=sink,
         )
@@ -175,13 +179,90 @@ def sweep(
 
 
 _BATCH_SIZE = 16
+_SIZE_CACHE_TTL = 60.0
+# path -> (computed_at_monotonic, used_bytes). Bookkeeping cache for
+# quota mode: deletes subtract from the cached total so the inner
+# bail-out check in _disk_pressure_pass doesn't trigger a fresh tree
+# walk after every file.
+_size_cache: dict[str, tuple[float, int]] = {}
 
 
-def _used_pct(recordings: str) -> float:
+def _scan_dir_bytes(path: str) -> int:
+    """Sum of file sizes in ``path``, recursing without crossing mount
+    points. Used by quota mode in place of ``shutil.disk_usage`` when
+    the OS-level free-space figure doesn't reflect the actual quota
+    (e.g. Synology shared folder, ZFS dataset, NFS share)."""
+    try:
+        root_dev = os.stat(path).st_dev
+    except OSError:
+        return 0
+    total = 0
+    stack = [path]
+    while stack:
+        cur = stack.pop()
+        try:
+            with os.scandir(cur) as it:
+                for entry in it:
+                    try:
+                        st = entry.stat(follow_symlinks=False)
+                    except OSError:
+                        continue
+                    if st.st_dev != root_dev:
+                        continue
+                    if entry.is_dir(follow_symlinks=False):
+                        stack.append(entry.path)
+                    elif entry.is_file(follow_symlinks=False):
+                        total += st.st_size
+        except OSError:
+            continue
+    return total
+
+
+def _cached_used_bytes(path: str, *, refresh: bool = False) -> int:
+    now = _time_mod.monotonic()
+    cached = _size_cache.get(path)
+    if not refresh and cached and (now - cached[0]) < _SIZE_CACHE_TTL:
+        return cached[1]
+    used = _scan_dir_bytes(path)
+    _size_cache[path] = (now, used)
+    return used
+
+
+def _cache_subtract(path: str, freed: int) -> None:
+    cached = _size_cache.get(path)
+    if cached is not None and freed > 0:
+        _size_cache[path] = (cached[0], max(0, cached[1] - freed))
+
+
+def _pct_exceeded(recordings: str, disk_pct: int) -> bool:
+    """Filesystem-percent rule. ``disk_pct == 0`` disables it."""
+    if disk_pct <= 0:
+        return False
     du = shutil.disk_usage(recordings)
     if du.total <= 0:
-        return 0.0
-    return du.used / du.total * 100.0
+        return False
+    return (du.used / du.total * 100.0) >= disk_pct
+
+
+def _quota_exceeded(recordings: str, quota_gb: int, *, refresh: bool = False) -> bool:
+    """Absolute-quota rule. ``quota_gb == 0`` disables it. Reads from
+    the cached size-walk (decremented in-place by each delete) so the
+    inner sweep loop doesn't pay for a tree walk per file."""
+    if quota_gb <= 0:
+        return False
+    return _cached_used_bytes(recordings, refresh=refresh) >= quota_gb * (1 << 30)
+
+
+def _over_threshold(
+    recordings: str, *, disk_pct: int, quota_gb: int, refresh: bool = False
+) -> bool:
+    """True if EITHER rule is currently breached. Independent triggers
+    — set the percentage to bound the underlying filesystem, set the
+    quota to bound bytes-under-recordings, or set both."""
+    return (
+        _pct_exceeded(recordings, disk_pct)
+        or _quota_exceeded(recordings, quota_gb, refresh=refresh)
+    )
 
 
 def _disk_pressure_pass(
@@ -189,26 +270,39 @@ def _disk_pressure_pass(
     recordings: str,
     *,
     disk_pct: int,
+    quota_gb: int,
     protect_ro: bool,
     sink,
 ) -> tuple[int, int, int]:
-    """Delete oldest clips first until disk usage is under the
-    threshold or no more eligible candidates remain.
+    """Delete oldest clips first until both pressure rules are
+    satisfied or no more eligible candidates remain.
 
-    Disk usage is re-checked at the top of each batch (cheap
-    syscall) and again after every individual delete inside the
-    batch — the inner check lets us bail the moment we drop
-    under the threshold, avoiding overshoot when a single delete
-    is already enough.
+    The two rules are independent: ``disk_pct`` measures the
+    underlying filesystem (cheap syscall via ``shutil.disk_usage``);
+    ``quota_gb`` measures bytes under ``recordings`` against a
+    declared cap (needed for Synology shares / ZFS datasets / NFS
+    where the OS-level free figure doesn't reflect the real
+    constraint). Either rule on its own works; if both are set we
+    keep deleting while either is breached.
 
-    If we exit still over-threshold AND ``protect_ro`` is on,
-    counts the surviving RO clips and reports them as
-    ``protected`` so an operator can see why disk usage didn't
-    drop. Returns ``(deleted, bytes_freed, protected)``.
+    Usage is re-checked at the top of each batch (forced fresh in
+    quota mode so the loop sees ground truth) and again after every
+    individual delete inside the batch. The inner check lets us bail
+    the moment all rules are satisfied, avoiding overshoot when a
+    single delete is already enough. The quota inner check reads the
+    bookkeeping cache (decremented by each delete) so we don't walk
+    the tree per file.
+
+    If we exit still over-threshold AND ``protect_ro`` is on, counts
+    the surviving RO clips and reports them as ``protected`` so an
+    operator can see why usage didn't drop. Returns ``(deleted,
+    bytes_freed, protected)``.
     """
     deleted = 0
     bytes_freed = 0
-    while _used_pct(recordings) >= disk_pct:
+    while _over_threshold(
+        recordings, disk_pct=disk_pct, quota_gb=quota_gb, refresh=True,
+    ):
         where = ""
         if protect_ro:
             where = "WHERE COALESCE(event_type, '') != 'ro'"
@@ -224,15 +318,21 @@ def _disk_pressure_pass(
         if not rows:
             break
         for row in rows:
-            bytes_freed += _delete_clip_files(row, recordings)
+            freed = _delete_clip_files(row, recordings)
+            _cache_subtract(recordings, freed)
+            bytes_freed += freed
             _delete_index_row(db, row["id"])
             deleted += 1
             _broadcast(sink, row["basename"], "disk")
-            if _used_pct(recordings) < disk_pct:
+            if not _over_threshold(
+                recordings, disk_pct=disk_pct, quota_gb=quota_gb,
+            ):
                 return deleted, bytes_freed, 0
 
     protected = 0
-    if protect_ro and _used_pct(recordings) >= disk_pct:
+    if protect_ro and _over_threshold(
+        recordings, disk_pct=disk_pct, quota_gb=quota_gb, refresh=True,
+    ):
         with db.conn() as c:
             protected = c.execute(
                 "SELECT COUNT(*) AS n FROM clip_index "
