@@ -2050,6 +2050,24 @@ function renderArchiveSection(pane) {
   h.style.marginTop = "24px";
   pane.appendChild(h);
 
+  // Live usage card. Sits between the heading and the threshold input
+  // so users can see what their threshold is being measured against.
+  const usageCard = document.createElement("div");
+  usageCard.className = "storage-usage";
+  usageCard.innerHTML = `
+    <div class="storage-usage-row">
+      <span class="storage-usage-label">Current usage</span>
+      <span class="storage-usage-value">…</span>
+    </div>
+    <div class="storage-usage-bar">
+      <div class="storage-usage-fill" style="width:0%"></div>
+      <div class="storage-usage-threshold" style="display:none"></div>
+    </div>
+    <p class="hint storage-usage-mode">…</p>
+  `;
+  pane.appendChild(usageCard);
+  refreshStorageUsage(usageCard);
+
   renderField(
     pane,
     "RETENTION_MAX_DAYS",
@@ -2087,6 +2105,64 @@ function renderArchiveSection(pane) {
     "cleanup runs whenever either is breached.";
   pane.appendChild(rnote);
 }
+
+// ---- Storage usage card ----
+
+function _fmtBytes(n) {
+  if (!n || n <= 0) return "0 B";
+  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+  let i = 0;
+  while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+  return (n < 10 ? n.toFixed(1) : Math.round(n)) + " " + units[i];
+}
+
+async function refreshStorageUsage(card) {
+  if (!card || !card.isConnected) return;
+  let body;
+  try {
+    body = await api("/api/storage/usage");
+  } catch (_) {
+    return;
+  }
+  if (!card.isConnected) return;
+
+  const value = card.querySelector(".storage-usage-value");
+  const fill  = card.querySelector(".storage-usage-fill");
+  const mark  = card.querySelector(".storage-usage-threshold");
+  const mode  = card.querySelector(".storage-usage-mode");
+
+  if (body.total_bytes <= 0 || body.used_pct === null) {
+    value.textContent = "Unavailable";
+    fill.style.width = "0%";
+    mark.style.display = "none";
+    mode.textContent = body.mode === "quota"
+      ? "Quota set but path unreadable."
+      : "Could not read filesystem stats.";
+    return;
+  }
+
+  const pct = body.used_pct;
+  value.textContent =
+    `${pct.toFixed(1)}% — ${_fmtBytes(body.used_bytes)} of ${_fmtBytes(body.total_bytes)}`;
+  fill.style.width = Math.min(100, pct) + "%";
+
+  // Tint the fill if we're at or past the cleanup threshold.
+  fill.classList.toggle("over-threshold",
+    body.threshold_pct != null && pct >= body.threshold_pct);
+
+  if (body.threshold_pct != null && body.threshold_pct > 0) {
+    mark.style.display = "block";
+    mark.style.left = Math.min(100, body.threshold_pct) + "%";
+    mark.title = `Cleanup threshold: ${body.threshold_pct}%`;
+  } else {
+    mark.style.display = "none";
+  }
+
+  mode.textContent = body.mode === "quota"
+    ? `Measured against your ${_fmtBytes(body.total_bytes)} quota.`
+    : `Measured against the filesystem containing recordings.`;
+}
+
 
 function renderWebSection(pane) {
   renderField(pane, "WEB_HOST", "Bind host", textInput("WEB_HOST"));

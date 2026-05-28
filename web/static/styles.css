@@ -1470,3 +1470,56 @@ main {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* ============================================================
+ * Storage usage card (Settings → Archive Retention)
+ * ============================================================ */
+.storage-usage {
+  margin: 0.5rem 0 1.25rem;
+  padding: 0.75rem 0.9rem;
+  background: var(--bg-elev, rgba(0,0,0,0.04));
+  border: 1px solid var(--border, rgba(0,0,0,0.1));
+  border-radius: 6px;
+}
+.storage-usage-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+.storage-usage-label {
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+.storage-usage-value {
+  font-variant-numeric: tabular-nums;
+  font-size: 0.9rem;
+  color: var(--muted, #666);
+}
+.storage-usage-bar {
+  position: relative;
+  height: 8px;
+  background: var(--bar-track, rgba(0,0,0,0.08));
+  border-radius: 4px;
+  overflow: hidden;
+}
+.storage-usage-fill {
+  height: 100%;
+  background: var(--accent, #19a974);
+  transition: width 0.4s ease, background 0.3s ease;
+}
+.storage-usage-fill.over-threshold {
+  background: #d33;
+}
+.storage-usage-threshold {
+  position: absolute;
+  top: -2px;
+  bottom: -2px;
+  width: 2px;
+  background: rgba(0,0,0,0.55);
+  pointer-events: auto;
+}
+.storage-usage-mode {
+  margin: 0.5rem 0 0;
+}

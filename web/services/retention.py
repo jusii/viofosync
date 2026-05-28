@@ -234,6 +234,35 @@ def _cache_subtract(path: str, freed: int) -> None:
         _size_cache[path] = (cached[0], max(0, cached[1] - freed))
 
 
+def disk_used_pct(recordings: str, quota_gb: int = 0) -> Optional[float]:
+    """Public helper for consumers (MQTT, status APIs) that want the
+    same used-% the retention sweep evaluates against.
+
+    Returns ``None`` when the recordings path is missing or the
+    quota is meaningless — callers should treat that as Unknown
+    rather than 0%. Reuses the 60-second tree-walk cache so two
+    consumers a minute apart don't double-walk.
+
+    For display only — the sweep itself uses ``_pct_exceeded`` and
+    ``_quota_exceeded`` to decide whether each rule is currently
+    breached, so a quota set without a percentage threshold (or
+    vice versa) triggers independently.
+    """
+    if quota_gb > 0:
+        used = _cached_used_bytes(recordings)
+        limit = quota_gb * (1 << 30)
+        if limit <= 0:
+            return None
+        return used / limit * 100.0
+    try:
+        du = shutil.disk_usage(recordings)
+    except (OSError, FileNotFoundError):
+        return None
+    if du.total <= 0:
+        return None
+    return du.used / du.total * 100.0
+
+
 def _pct_exceeded(recordings: str, disk_pct: int) -> bool:
     """Filesystem-percent rule. ``disk_pct == 0`` disables it."""
     if disk_pct <= 0:
