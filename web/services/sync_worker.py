@@ -44,6 +44,12 @@ log = logging.getLogger("viofosync.sync_worker")
 
 BACKOFF_STEPS = [10, 30, 120, 600]  # seconds
 
+# How often the standalone retention loop enforces the archive caps,
+# independent of whether anything was downloaded. The download cycle
+# still sweeps immediately after a drain; this loop is what keeps the
+# archive bounded when the camera is offline or has nothing new.
+RETENTION_INTERVAL_SECONDS = 300  # 5 minutes
+
 
 def _filter_ro_only(listing):
     """Yield only Recordings whose dashcam source path lies under
@@ -271,6 +277,7 @@ class SyncWorker:
         self._provider = provider
         self.hub = hub
         self._task: Optional[asyncio.Task] = None
+        self._retention_task: Optional[asyncio.Task] = None
         self._stop = asyncio.Event()
         self._cancel_current = threading.Event()
         self._kick = asyncio.Event()
@@ -313,6 +320,12 @@ class SyncWorker:
         self._task = asyncio.run_coroutine_threadsafe(
             self._run(), self._loop
         )
+        # Retention runs on its own cadence, decoupled from the
+        # download cycle: a parked/offline camera or an empty queue
+        # must not stop the archive caps from being enforced.
+        self._retention_task = asyncio.run_coroutine_threadsafe(
+            self._retention_loop(), self._loop
+        )
 
     def _is_running(self) -> bool:
         if self._task is None:
@@ -325,18 +338,20 @@ class SyncWorker:
         self._stop.set()
         self._cancel_current.set()
         self._kick.set()
-        if self._task is not None:
-            # self._task may be an asyncio.Task or a
+        import concurrent.futures
+        for task in (self._task, self._retention_task):
+            if task is None:
+                continue
+            # ``task`` may be an asyncio.Task or a
             # concurrent.futures.Future — wrap uniformly.
-            import concurrent.futures
             try:
-                if isinstance(self._task, concurrent.futures.Future):
-                    await asyncio.wrap_future(self._task)
+                if isinstance(task, concurrent.futures.Future):
+                    await asyncio.wrap_future(task)
                 else:
-                    await asyncio.wait_for(self._task, timeout=10.0)
+                    await asyncio.wait_for(task, timeout=10.0)
             except (asyncio.TimeoutError, Exception):
                 try:
-                    self._task.cancel()
+                    task.cancel()
                 except Exception:
                     pass
 
@@ -499,6 +514,47 @@ class SyncWorker:
             except asyncio.TimeoutError:
                 pass
             self._kick.clear()
+
+    async def _retention_loop(self) -> None:
+        """Enforce the archive caps on a fixed cadence, independent of
+        download activity and camera reachability.
+
+        The download cycle's own post-drain sweep handles clips that
+        just arrived; this loop is what keeps the archive under quota
+        when the camera is offline or has nothing new to download —
+        the cases where ``_cycle`` returns before reaching its sweep.
+        Runs only while the worker is running, so retention follows
+        the same lifecycle as scheduled sync.
+        """
+        while not self._stop.is_set():
+            try:
+                await self._run_retention_sweep()
+            except Exception:  # pragma: no cover — never kill the loop
+                log.exception("periodic retention sweep failed")
+            # Sleep until the next pass, waking immediately on stop.
+            try:
+                await asyncio.wait_for(
+                    self._stop.wait(), timeout=RETENTION_INTERVAL_SECONDS
+                )
+            except asyncio.TimeoutError:
+                pass
+
+    async def _run_retention_sweep(self) -> None:
+        """Run one retention pass against the live settings, then
+        refresh the broadcast disk %. Offloaded to a thread because
+        the sweep walks the archive and touches the DB."""
+        snap = self._provider.get()
+        sink = WebSink(self.hub, asyncio.get_running_loop())
+        await asyncio.to_thread(
+            _retention.sweep,
+            self.db, snap.recordings,
+            max_days=snap.retention_max_days,
+            disk_pct=snap.retention_disk_pct,
+            protect_ro=snap.retention_protect_ro,
+            quota_gb=snap.recordings_quota_gb,
+            sink=sink,
+        )
+        await self._emit_disk_pct()
 
     # ---- probe ----
 
