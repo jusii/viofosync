@@ -255,7 +255,9 @@ nav a.active { background: var(--panel-2); }
 }
 .spacer { flex: 1; }
 .status {
-  padding: 4px 10px;
+  display: inline-flex; align-items: center;
+  height: 34px;
+  padding: 0 12px;
   border-radius: 999px;
   background: var(--panel-2);
   border: 1px solid var(--border);
