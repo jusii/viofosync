@@ -2244,6 +2244,21 @@ function renderArchiveSection(pane) {
     "free space doesn't reflect the actual limit. If both are set, " +
     "cleanup runs whenever either is breached.";
   pane.appendChild(rnote);
+
+  renderField(
+    pane,
+    "DISK_CRITICAL_PCT",
+    "Flag an error at N% of filesystem full (0 = disabled)",
+    textInput("DISK_CRITICAL_PCT", { type: "number", min: 0, max: 100 }),
+  );
+  const cnote = document.createElement("p");
+  cnote.className = "hint";
+  cnote.textContent =
+    "When the filesystem reaches this level, sync stops and the status " +
+    "flips to an error (“disk N% full”). Keep it at or above the " +
+    "filesystem-% cleanup trigger above so retention gets a chance to free " +
+    "space first.";
+  pane.appendChild(cnote);
 }
 
 // ---- Storage usage card ----

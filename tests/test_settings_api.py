@@ -150,3 +150,20 @@ def test_address_fallback_round_trips(authed_client) -> None:
 
     got = authed_client.get("/api/settings")
     assert got.json()["editable"]["ADDRESS_FALLBACK"] == "10.0.0.9"
+
+
+def test_get_settings_includes_disk_critical_pct(authed_client) -> None:
+    r = authed_client.get("/api/settings")
+    body = r.json()
+    assert "DISK_CRITICAL_PCT" in body["editable"]
+    assert body["editable"]["DISK_CRITICAL_PCT"] == 95
+
+
+def test_disk_critical_pct_round_trips(authed_client) -> None:
+    # PUT a new critical threshold, then GET it back through the projection.
+    put = authed_client.put("/api/settings", json={"DISK_CRITICAL_PCT": 90})
+    assert put.status_code == 200
+    assert put.json()["editable"]["DISK_CRITICAL_PCT"] == 90
+
+    got = authed_client.get("/api/settings")
+    assert got.json()["editable"]["DISK_CRITICAL_PCT"] == 90
