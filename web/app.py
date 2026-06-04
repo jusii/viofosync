@@ -40,6 +40,7 @@ from .services.exporter import (
     probe_encoders,
 )
 from .services.geocode import GeocodeService
+from .services.download_session import DownloadSession
 from .services.hub import Hub
 from .services.mqtt import MqttService
 from .services.sync_worker import SyncWorker
@@ -142,7 +143,13 @@ async def lifespan(app: FastAPI):
 
     app.state.retention_task = asyncio.create_task(_background_retention())
 
-    app.state.hub = Hub(settings_provider=provider)
+    app.state.download_session = DownloadSession(
+        remaining_bytes_provider=lambda: _q_mod.pending_bytes(app.state.db),
+    )
+    app.state.hub = Hub(
+        settings_provider=provider,
+        session=app.state.download_session,
+    )
     # Compute initial sync_status so the very first WebSocket snapshot
     # and the first MQTT publish carry the right value without waiting
     # for the sync worker's first cycle.

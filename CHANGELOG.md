@@ -19,6 +19,12 @@
 - New `DISK_CRITICAL_PCT` setting (Snapshot field `disk_critical_pct`)
   configures the disk-pressure threshold above which sync goes into
   `error`. Must be `>= RETENTION_DISK_PCT`.
+- The download manager now shows a session-wide moving-average download
+  speed and an estimated time to complete while a sync is running.
+- New Home Assistant `download_speed` sensor (`data_rate`, MB/s) reports
+  the session moving average. To avoid flooding HA it publishes first at
+  ~30 s into a session then at most once per minute, and reports `0` when
+  idle. Enabled by default.
 
 ### Changed
 - Unified `sync_status` to four states: `downloading`, `waiting`,

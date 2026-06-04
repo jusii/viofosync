@@ -574,6 +574,13 @@ function fmtDuration(seconds) {
   return rem ? `${h}h ${rem}m` : `${h}h`;
 }
 
+// ETA wants sub-minute precision; fmtDuration rounds those to "0 min".
+function fmtEta(seconds) {
+  if (seconds == null) return "—";
+  if (seconds < 60) return `${Math.round(seconds)}s`;
+  return fmtDuration(seconds);
+}
+
 function renderStopCard(stop, clips, idx) {
   const startT = new Date(stop.start_time).toLocaleTimeString();
   const endT = new Date(stop.end_time).toLocaleTimeString();
@@ -1659,7 +1666,8 @@ function appendLog(ev) {
   // Per-chunk progress is already shown live in the progress bar
   // above (downloads) or the Export jobs table (exports); mirroring
   // it in the log buries everything else.
-  if (ev.type === "item_progress" || ev.type === "export_progress") return;
+  if (ev.type === "item_progress" || ev.type === "export_progress"
+      || ev.type === "session_stats") return;
   const line = document.createElement("div");
   line.className = "log-line";
   const ts = new Date().toLocaleTimeString();
@@ -1721,6 +1729,7 @@ function handleEvent(ev) {
         applyStatus(ev.state.sync_status, ev.state.sync_status_reason);
       }
       if (ev.state.current_item) updateCurrent(ev.state.current_item);
+      if (ev.state.session) updateSessionStats(ev.state.session);
       if (ev.state.sync_state) {
         state.syncRunning = ev.state.sync_state.running;
         state.syncPaused = ev.state.sync_state.paused;
@@ -1750,6 +1759,9 @@ function handleEvent(ev) {
       document.getElementById("current-download").innerHTML = "";
       state.currentFilename = null;
       refreshQueueIfVisible();
+      break;
+    case "session_stats":
+      updateSessionStats(ev);
       break;
     case "queue_reconciled":
     case "sync_done":
@@ -1815,6 +1827,26 @@ function updateCurrent(info) {
     <div class="bar"><div style="width:${pct}%"></div></div>
   `;
   state.currentFilename = info.filename;
+}
+
+function updateSessionStats(s) {
+  const el = document.getElementById("session-stats");
+  if (!el) return;
+  if (!s || !s.active) {
+    el.hidden = true;
+    el.textContent = "";
+    return;
+  }
+  const parts = [];
+  if (s.avg_speed_bps != null) {
+    parts.push(`avg ${fmtBytes(s.avg_speed_bps)}/s`);
+  }
+  if (s.eta_seconds != null) {
+    parts.push(`ETA ${fmtEta(s.eta_seconds)}`);
+  }
+  parts.push(`${fmtBytes(s.session_bytes)} this session`);
+  el.textContent = "Session · " + parts.join(" · ");
+  el.hidden = false;
 }
 
 // ---------- Settings ----------

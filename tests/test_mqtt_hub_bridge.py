@@ -19,3 +19,16 @@ def test_clip_indexed_affects_archive_entities():
 def test_unknown_event_yields_empty():
     from web.services.mqtt import entities_affected_by
     assert list(entities_affected_by("this_event_does_not_exist")) == []
+
+
+def test_download_speed_triggered_by_broadcast_events():
+    """Regression: download_speed must trigger on source events that flow
+    through Hub.broadcast (e.g. item_progress), NOT the session_stats
+    follow-up — that is emitted via a direct send and never reaches the
+    MQTT bridge, so an entity keyed on it would never re-publish."""
+    from web.services.mqtt import entities_affected_by
+    assert "download_speed" in {
+        e.object_id for e in entities_affected_by("item_progress")
+    }
+    # session_stats is a follow-up event; no entity should depend on it.
+    assert list(entities_affected_by("session_stats")) == []

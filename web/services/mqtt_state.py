@@ -113,6 +113,30 @@ def state_current_progress(hub, db, snapshot) -> Optional[str]:
     return f"{pct}"
 
 
+# Suppress publishing the session speed until the window has filled and
+# the average has stabilised.
+SPEED_PUBLISH_DELAY_S = 30.0
+
+
+def state_download_speed(hub, db, snapshot) -> Optional[str]:
+    """Session moving-average download speed in MB/s.
+
+    Returns ``None`` (no publish) for the first ``SPEED_PUBLISH_DELAY_S``
+    of a session or before the average is computable; ``"0"`` when idle.
+    Combined with the entity's 60 s ``min_publish_interval_s`` this yields
+    a first publish at ~30 s then at most once per 60 s.
+    """
+    sess = hub.last_state.get("session") or {}
+    if not sess.get("active"):
+        return "0"
+    if (sess.get("elapsed_s") or 0) < SPEED_PUBLISH_DELAY_S:
+        return None
+    bps = sess.get("avg_speed_bps")
+    if bps is None:
+        return None
+    return f"{bps / (1024 * 1024):.1f}"
+
+
 # ---- disk
 
 def state_disk_used(hub, db, snapshot) -> Optional[str]:

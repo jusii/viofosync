@@ -565,6 +565,21 @@ def list_day_items(
     return [dict(r) for r in rows]
 
 
+def pending_bytes(db: Database) -> int:
+    """Total ``remote_size`` across all rows in state ``pending``.
+
+    Feeds the session ETA. HTML-listing rows are MB-rounded, which is
+    fine for an estimate; rows are corrected to byte-exact sizes after
+    each download.
+    """
+    with db.conn() as c:
+        row = c.execute(
+            "SELECT COALESCE(SUM(remote_size), 0) AS n "
+            "FROM download_queue WHERE state='pending'"
+        ).fetchone()
+    return int(row["n"])
+
+
 def prioritize_recent_hours(db: Database, hours: float) -> int:
     """Bump all pending items recorded in the last ``hours``
     hours to the top of the queue. Returns the count updated."""

@@ -311,3 +311,45 @@ def test_state_disk_used_missing_path_returns_none(tmp_path):
     assert out is None
 
 
+# ---- download speed (session moving average)
+
+def test_state_download_speed_none_before_30s():
+    from web.services.mqtt_state import state_download_speed
+    hub = _hub_with_state({"session": {
+        "active": True, "elapsed_s": 10.0,
+        "avg_speed_bps": float(5 * 1024 * 1024),
+    }})
+    assert state_download_speed(hub, None, _stub_snapshot()) is None
+
+
+def test_state_download_speed_value_after_30s():
+    from web.services.mqtt_state import state_download_speed
+    hub = _hub_with_state({"session": {
+        "active": True, "elapsed_s": 35.0,
+        "avg_speed_bps": float(2 * 1024 * 1024),
+    }})
+    assert state_download_speed(hub, None, _stub_snapshot()) == "2.0"
+
+
+def test_state_download_speed_zero_when_idle():
+    from web.services.mqtt_state import state_download_speed
+    hub = _hub_with_state({"session": {
+        "active": False, "elapsed_s": 0.0, "avg_speed_bps": None,
+    }})
+    assert state_download_speed(hub, None, _stub_snapshot()) == "0"
+
+
+def test_state_download_speed_zero_when_no_session_key():
+    from web.services.mqtt_state import state_download_speed
+    hub = _hub_with_state({})
+    assert state_download_speed(hub, None, _stub_snapshot()) == "0"
+
+
+def test_state_download_speed_none_when_avg_unavailable():
+    from web.services.mqtt_state import state_download_speed
+    hub = _hub_with_state({"session": {
+        "active": True, "elapsed_s": 35.0, "avg_speed_bps": None,
+    }})
+    assert state_download_speed(hub, None, _stub_snapshot()) is None
+
+

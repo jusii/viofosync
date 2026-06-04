@@ -265,6 +265,23 @@ TOPOLOGY: list[EntityDef] = [
                                 "item_finished"),
         qos=0,
     ),
+    EntityDef(
+        object_id="download_speed",
+        component="sensor",
+        name="Download speed",
+        icon="mdi:speedometer",
+        device_class="data_rate",
+        state_class="measurement",
+        unit_of_measurement="MB/s",
+        enabled_by_default=True,
+        min_publish_interval_s=60.0,
+        state_fn=_st.state_download_speed,
+        command_handler=None,
+        affected_by_hub_events=("item_progress", "item_started",
+                                "item_finished", "sync_done", "sync_state",
+                                "dashcam_offline"),
+        qos=0,
+    ),
 
     # --- Disk / sync history ---
     EntityDef(

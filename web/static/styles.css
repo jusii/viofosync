@@ -662,6 +662,13 @@ main {
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.01em;
 }
+.session-stats {
+  color: var(--muted);
+  font-size: 13px;
+  margin-bottom: 10px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.01em;
+}
 #queue { width: 100%; border-collapse: collapse; }
 #queue th.sortable {
   cursor: pointer; user-select: none; white-space: nowrap;

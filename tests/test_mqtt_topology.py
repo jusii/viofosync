@@ -136,3 +136,39 @@ def test_state_entities_default_to_global_qos():
     by_id = {e.object_id: e for e in TOPOLOGY}
     assert by_id["sync_status"].qos is None
     assert by_id["dashcam"].qos is None
+
+
+def test_download_speed_entity_present():
+    from web.services.mqtt_topology import TOPOLOGY
+    assert "download_speed" in {e.object_id for e in TOPOLOGY}
+
+
+def test_download_speed_entity_config():
+    from web.services.mqtt_topology import TOPOLOGY
+    from web.services.mqtt_state import state_download_speed
+    e = next(x for x in TOPOLOGY if x.object_id == "download_speed")
+    assert e.component == "sensor"
+    assert e.device_class == "data_rate"
+    assert e.unit_of_measurement == "MB/s"
+    assert e.state_class == "measurement"
+    assert e.enabled_by_default is True
+    assert e.min_publish_interval_s == 60.0
+    assert e.qos == 0
+    assert e.affected_by_hub_events == (
+        "item_progress", "item_started", "item_finished",
+        "sync_done", "sync_state", "dashcam_offline",
+    )
+    assert e.state_fn is state_download_speed
+
+
+def test_download_speed_discovery_payload():
+    from web.services.mqtt_topology import TOPOLOGY, build_discovery_payload
+    e = next(x for x in TOPOLOGY if x.object_id == "download_speed")
+    cfg = {"discovery_prefix": "homeassistant", "node_id": "viofosync",
+           "version": "1", "configuration_url": ""}
+    p = build_discovery_payload(e, cfg)
+    assert p["device_class"] == "data_rate"
+    assert p["unit_of_measurement"] == "MB/s"
+    assert p["state_class"] == "measurement"
+    assert p["enabled_by_default"] is True
+    assert p["state_topic"] == "viofosync/download_speed/state"
