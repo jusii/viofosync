@@ -34,3 +34,6 @@ config.json
 .venv/
 docs/*
 CLAUDE.md
+
+# Superpowers brainstorming companion (local mockups)
+.superpowers/

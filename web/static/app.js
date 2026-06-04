@@ -15,6 +15,7 @@ const state = {
   queueDays: [],           // list of day summaries from /api/queue/days
   queueDayItems: {},       // { 'YYYY-MM-DD': [items] } for expanded days
   queueExpanded: new Set(),
+  queueHoursExpanded: new Set(), // keys: "YYYY-MM-DD HH" (HH may be "??")
   queueSelected: new Set(),// filenames ticked
   filters: { driving: true, parking: true, ro: true },
   showMaps: localStorage.getItem("vfs.showMaps") !== "0",
@@ -1362,6 +1363,50 @@ function renderPagination(total) {
 
 // ---------- Downloads ----------
 
+// Two-digit hour ("00".."23") for a queue item, derived from the
+// dashcam filename (YYYY_MMDD_HHMMSS_…). Filename-derived (not
+// recorded_at) to stay timezone-stable and consistent with the
+// server's day grouping (_day_expr in services/queue.py). Names that
+// don't match bucket under "??" so they stay visible and sort last.
+function hourKeyForItem(it) {
+  const m = /^\d{4}_\d{4}_(\d{2})/.exec(it.filename || "");
+  return m ? m[1] : "??";
+}
+
+// Bucket a day's items by hour. Returns [{ hour, items }] with hours
+// newest-first and any "??" bucket last.
+function groupItemsByHour(items) {
+  const buckets = new Map();
+  for (const it of items) {
+    const hh = hourKeyForItem(it);
+    if (!buckets.has(hh)) buckets.set(hh, []);
+    buckets.get(hh).push(it);
+  }
+  const keys = [...buckets.keys()].sort((a, b) => {
+    if (a === "??") return 1;
+    if (b === "??") return -1;
+    return Number(b) - Number(a);
+  });
+  return keys.map((hh) => ({ hour: hh, items: buckets.get(hh) }));
+}
+
+// Per-hour counts + summed bytes for the hour row, computed client-side
+// from the bucket. State counts use bare keys (pending/downloading/done/
+// failed/gone) and are consumed only by renderQueueHour — not the
+// server-derived day summaries (which use *_count) — so they deliberately
+// diverge from that naming.
+function hourSummary(items) {
+  const s = {
+    clip_count: items.length, total_bytes: 0,
+    pending: 0, downloading: 0, done: 0, failed: 0, gone: 0,
+  };
+  for (const it of items) {
+    s.total_bytes += it.remote_size || 0;
+    if (Object.prototype.hasOwnProperty.call(s, it.state)) s[it.state]++;
+  }
+  return s;
+}
+
 function queueKindParams(q) {
   q.set("driving", state.queueKinds.driving ? "true" : "false");
   q.set("parking", state.queueKinds.parking ? "true" : "false");
@@ -1379,6 +1424,11 @@ async function loadQueue() {
   const liveDays = new Set(data.days.map((d) => d.day));
   for (const d of Object.keys(state.queueDayItems)) {
     if (!liveDays.has(d)) delete state.queueDayItems[d];
+  }
+  for (const key of [...state.queueHoursExpanded]) {
+    if (!liveDays.has(key.split(" ")[0])) {
+      state.queueHoursExpanded.delete(key);
+    }
   }
   // Refresh items for any expanded days so live counts stay in sync.
   await Promise.all(
@@ -1507,20 +1557,105 @@ function renderQueueDayCard(d) {
 
   if (expanded && state.queueDayItems[d.day]) {
     const body = el.querySelector(".queue-day-body");
-    body.appendChild(renderDayItemsTable(d.day, state.queueDayItems[d.day]));
+    body.appendChild(renderDayHours(d.day, state.queueDayItems[d.day]));
   }
 
   return el;
 }
 
-function renderDayItemsTable(day, items) {
+function renderDayHours(day, items) {
   const wrap = document.createElement("div");
+  wrap.className = "queue-hours";
   if (!items.length) {
     wrap.innerHTML = `<p style="color:var(--muted);padding:8px">
       No files match this filter.
     </p>`;
     return wrap;
   }
+  for (const group of groupItemsByHour(items)) {
+    wrap.appendChild(renderQueueHour(day, group.hour, group.items));
+  }
+  return wrap;
+}
+
+function renderQueueHour(day, hh, items) {
+  const el = document.createElement("div");
+  el.className = "queue-hour";
+  el.dataset.hour = hh;
+  const key = `${day} ${hh}`;
+  const expanded = state.queueHoursExpanded.has(key);
+  const s = hourSummary(items);
+  const checkState = hourCheckState(day, hh);
+  const hasPending = s.pending > 0;
+  const label = hh === "??" ? "Unknown time" : `${hh}:00–${hh}:59`;
+
+  const pieces = [];
+  if (s.downloading) pieces.push(`<span class="state-downloading">${s.downloading} downloading</span>`);
+  if (s.pending)     pieces.push(`<span class="state-pending">${s.pending} pending</span>`);
+  if (s.done)        pieces.push(`<span class="state-done">${s.done} done</span>`);
+  if (s.failed)      pieces.push(`<span class="state-failed">${s.failed} failed</span>`);
+  if (s.gone)        pieces.push(`<span class="state-gone">${s.gone} gone</span>`);
+
+  el.innerHTML = `
+    <div class="queue-hour-header">
+      <span class="caret">${expanded ? "▾" : "▸"}</span>
+      <input type="checkbox" class="qh-check" data-hour="${hh}"
+             ${checkState === "checked" ? "checked" : ""}
+             ${!hasPending ? "disabled title='No pending clips'" : ""} />
+      <span class="hour-label">${label}</span>
+      <span class="meta">${s.clip_count} clips · ${fmtMB(s.total_bytes)}</span>
+      <div class="state-breakdown">${pieces.join("")}</div>
+    </div>
+    <div class="queue-hour-body" ${expanded ? "" : "hidden"}></div>
+  `;
+
+  const checkbox = el.querySelector(".qh-check");
+  if (checkState === "indeterminate") checkbox.indeterminate = true;
+  checkbox.addEventListener("click", (e) => e.stopPropagation());
+  checkbox.addEventListener("change", (e) => {
+    // Recompute live: this row updates surgically (no full re-render),
+    // so a captured checkState would go stale across repeated clicks and
+    // break deselect on an hour that began indeterminate.
+    const live = hourCheckState(day, hh);
+    const shouldSelect = e.target.checked || live === "indeterminate";
+    toggleHourSelection(day, hh, shouldSelect);
+    // Reflect onto any rendered file rows + recompute the headers,
+    // surgically — no full re-render, so scroll is preserved.
+    el.querySelectorAll(".queue-hour-body .qi-check").forEach((cb) => {
+      cb.checked = state.queueSelected.has(cb.value);
+    });
+    updateHourHeaderCheckbox(day, hh);
+    updateDayHeaderCheckbox(day);
+    renderQueueMeta();
+  });
+
+  const header = el.querySelector(".queue-hour-header");
+  header.addEventListener("click", (e) => {
+    if (e.target.closest(".qh-check")) return;
+    const body = el.querySelector(".queue-hour-body");
+    const caret = el.querySelector(".caret");
+    if (state.queueHoursExpanded.has(key)) {
+      state.queueHoursExpanded.delete(key);
+      body.hidden = true;
+      body.innerHTML = "";
+      caret.textContent = "▸";
+    } else {
+      state.queueHoursExpanded.add(key);
+      body.appendChild(renderHourBody(day, hh, items));
+      body.hidden = false;
+      caret.textContent = "▾";
+    }
+  });
+
+  if (expanded) {
+    el.querySelector(".queue-hour-body")
+      .appendChild(renderHourBody(day, hh, items));
+  }
+  return el;
+}
+
+function renderHourBody(day, hh, items) {
+  const wrap = document.createElement("div");
   const table = document.createElement("table");
   table.className = "queue-items";
   table.innerHTML = `
@@ -1539,8 +1674,7 @@ function renderDayItemsTable(day, items) {
   const tbody = table.querySelector("tbody");
   for (const it of items) {
     const tr = document.createElement("tr");
-    const size = it.remote_size
-      ? fmtMB(it.remote_size) : "—";
+    const size = it.remote_size ? fmtMB(it.remote_size) : "—";
     const ts = it.recorded_at
       ? new Date(it.recorded_at * 1000).toLocaleTimeString() : "—";
     const pos = it.queue_position === 0 ? "▶" :
@@ -1567,9 +1701,11 @@ function renderDayItemsTable(day, items) {
     if (!cb) return;
     if (cb.checked) state.queueSelected.add(cb.value);
     else state.queueSelected.delete(cb.value);
-    // Update just this day's header checkbox without a full re-render,
-    // so the user's scroll position isn't lost.
+    // Update this file's hour checkbox and the day checkbox in place,
+    // preserving scroll position (no re-render).
+    updateHourHeaderCheckbox(day, hh);
     updateDayHeaderCheckbox(day);
+    renderQueueMeta();
   });
   wrap.appendChild(table);
   return wrap;
@@ -1614,6 +1750,54 @@ function updateDayHeaderCheckbox(day) {
   const cb = card.querySelector(".qd-check");
   const selected = countSelectedInDay(day);
   const st = dayCheckState(summary, selected);
+  cb.indeterminate = st === "indeterminate";
+  cb.checked = st === "checked";
+}
+
+// ---- Hour-level selection (twins of the day helpers above) ----
+
+function itemsInHour(day, hh) {
+  const items = state.queueDayItems[day] || [];
+  return items.filter((it) => hourKeyForItem(it) === hh);
+}
+
+function hourPendingCount(day, hh) {
+  let n = 0;
+  for (const it of itemsInHour(day, hh)) if (it.state === "pending") n++;
+  return n;
+}
+
+function countSelectedInHour(day, hh) {
+  let n = 0;
+  for (const it of itemsInHour(day, hh)) {
+    if (it.state === "pending" && state.queueSelected.has(it.filename)) n++;
+  }
+  return n;
+}
+
+function hourCheckState(day, hh) {
+  const pending = hourPendingCount(day, hh);
+  if (!pending) return "unchecked";
+  const sel = countSelectedInHour(day, hh);
+  if (sel === 0) return "unchecked";
+  if (sel >= pending) return "checked";
+  return "indeterminate";
+}
+
+function toggleHourSelection(day, hh, select) {
+  for (const it of itemsInHour(day, hh)) {
+    if (it.state !== "pending") continue;
+    if (select) state.queueSelected.add(it.filename);
+    else state.queueSelected.delete(it.filename);
+  }
+}
+
+function updateHourHeaderCheckbox(day, hh) {
+  const card = document.querySelector(`.queue-day[data-day="${day}"]`);
+  if (!card) return;
+  const cb = card.querySelector(`.qh-check[data-hour="${hh}"]`);
+  if (!cb) return;
+  const st = hourCheckState(day, hh);
   cb.indeterminate = st === "indeterminate";
   cb.checked = st === "checked";
 }
