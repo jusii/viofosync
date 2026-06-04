@@ -407,13 +407,81 @@ main {
 }
 .exports-table { width: 100%; border-collapse: collapse; }
 .exports-table th, .exports-table td {
-  padding: 6px 10px; text-align: left;
+  padding: 7px 10px; text-align: left; vertical-align: middle;
   border-bottom: 1px solid var(--border); font-size: 13px;
 }
 .exports-table th { color: var(--muted); font-weight: 500; }
+.exports-table tbody tr:last-child td { border-bottom: none; }
+.exports-table tbody tr:hover { background: var(--panel-2); }
 .state-queued   { color: var(--muted); }
 .state-running  { color: var(--accent); }
 .state-cancelled { color: var(--warn); }
+
+/* Type badge — small accent-tinted pill. */
+.export-type {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--accent-10);
+  border: 1px solid var(--accent-35);
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+/* Status cell — state text + slim inline progress bar. */
+.export-status .export-err { color: var(--err-text); }
+.export-progress {
+  margin-top: 5px;
+  height: 4px;
+  width: 100%;
+  max-width: 160px;
+  background: var(--panel-3);
+  border-radius: 999px;
+  overflow: hidden;
+}
+.export-progress-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: inherit;
+  transition: width 200ms ease;
+}
+.export-stage {
+  display: block;
+  margin-top: 3px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+/* Footage cell — date range + clip count. */
+.export-footage { white-space: nowrap; }
+.export-count { color: var(--muted); }
+
+/* Actions — right-aligned icon buttons; the trailing delete button
+ * lines up in a column across rows, with download just left of it. */
+.exports-actions-col { width: 1%; }
+.export-actions { text-align: right; white-space: nowrap; }
+.export-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  vertical-align: middle;
+  text-decoration: none;
+}
+.export-action + .export-action { margin-left: 4px; }
+.export-action:hover { background: var(--panel-3); color: var(--text); }
+.export-delete:hover { color: var(--err-text); }
+/* Reserves the download slot so the bin never shifts. */
+.export-action--empty { visibility: hidden; cursor: default; }
 
 /* Day cards */
 .day {

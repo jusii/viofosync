@@ -111,6 +111,37 @@ def test_download_uses_derived_filename(logged_in_client,
     assert expected in r.headers["content-disposition"]
 
 
+def _insert_job_with_range(db, job_type, clip_ids, clip_start, clip_end):
+    import json
+    with db.write() as c:
+        cur = c.execute(
+            "INSERT INTO export_jobs "
+            "(type, clip_ids, state, created_at, clip_start, clip_end) "
+            "VALUES (?,?, 'done', 1, ?, ?)",
+            (job_type, json.dumps({"clip_ids": clip_ids,
+                                   "encoder": "software"}),
+             clip_start, clip_end),
+        )
+        return cur.lastrowid
+
+
+def test_list_jobs_returns_clip_range_and_count(logged_in_client):
+    """GET /api/exports surfaces the stored footage date range and a
+    clip count derived from clip_ids, so the UI can render the
+    'Footage' column without per-row clip lookups."""
+    db = logged_in_client.app.state.db
+    ts1 = _ts(2024, 3, 15, 14, 30)
+    ts2 = _ts(2024, 3, 15, 15, 2)
+    job_id = _insert_job_with_range(db, "join_front", [1, 2], ts1, ts2)
+
+    r = logged_in_client.get("/api/exports")
+    assert r.status_code == 200
+    job = next(j for j in r.json()["jobs"] if j["id"] == job_id)
+    assert job["clip_start"] == ts1
+    assert job["clip_end"] == ts2
+    assert job["clip_count"] == 2
+
+
 def test_download_falls_back_when_clips_pruned(logged_in_client,
                                                tmp_recordings_dir):
     """A done job whose source clips were retention-pruned still

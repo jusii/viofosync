@@ -97,10 +97,18 @@ def list_jobs(request: Request) -> JSONResponse:
     with request.app.state.db.conn() as c:
         rows = c.execute(
             "SELECT id, type, state, progress, error, "
-            "created_at, started_at, finished_at "
+            "created_at, started_at, finished_at, "
+            "clip_start, clip_end, clip_ids "
             "FROM export_jobs ORDER BY created_at DESC LIMIT 100"
         ).fetchall()
-    return JSONResponse({"jobs": [dict(r) for r in rows]})
+    jobs = []
+    for r in rows:
+        job = dict(r)
+        # clip_count is derived from the always-present clip_ids; the
+        # raw id list isn't useful to the UI, so swap it out.
+        job["clip_count"] = len(parse_clip_ids(job.pop("clip_ids")))
+        jobs.append(job)
+    return JSONResponse({"jobs": jobs})
 
 
 @router.get("/{job_id}/download")

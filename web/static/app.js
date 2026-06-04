@@ -1164,6 +1164,64 @@ function updateExportsSummary(jobs) {
     : "Export jobs";
 }
 
+// Human-readable export type labels. These echo the toolbar
+// buttons: Join F/R and the PiP Fr/Rf (front-main / rear-main).
+const EXPORT_TYPE_LABELS = {
+  join_front: "Join Front",
+  join_rear: "Join Rear",
+  pip: "PiP Fr",
+  pip_rear: "PiP Rf",
+};
+
+// Heroicons solid (MIT) — arrow-down-tray (download) + trash (delete),
+// matching the inline-SVG / currentColor pattern used in the header.
+const EXPORT_ICON_DOWNLOAD =
+  '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" ' +
+  'aria-hidden="true"><path fill-rule="evenodd" d="M12 2.25a.75.75 0 0 1 ' +
+  '.75.75v11.69l3.22-3.22a.75.75 0 1 1 1.06 1.06l-4.5 4.5a.75.75 0 0 1-1.06 ' +
+  '0l-4.5-4.5a.75.75 0 1 1 1.06-1.06l3.22 3.22V3a.75.75 0 0 1 .75-.75Zm-9 ' +
+  '13.5a.75.75 0 0 1 .75.75v2.25a1.5 1.5 0 0 0 1.5 1.5h13.5a1.5 1.5 0 0 0 ' +
+  '1.5-1.5V16.5a.75.75 0 0 1 1.5 0v2.25a3 3 0 0 1-3 3H5.25a3 3 0 0 1-3-3V' +
+  '16.5a.75.75 0 0 1 .75-.75Z" clip-rule="evenodd"/></svg>';
+
+const EXPORT_ICON_TRASH =
+  '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" ' +
+  'aria-hidden="true"><path fill-rule="evenodd" d="M16.5 4.478v.227a48.816 ' +
+  '48.816 0 0 1 3.878.512.75.75 0 1 1-.256 1.478l-.209-.035-1.005 13.07a3 ' +
+  '3 0 0 1-2.991 2.77H8.084a3 3 0 0 1-2.991-2.77L4.087 6.66l-.209.035a.75' +
+  '.75 0 0 1-.256-1.478A48.567 48.567 0 0 1 7.5 4.705v-.227c0-1.564 1.213-' +
+  '2.9 2.816-2.951a52.662 52.662 0 0 1 3.369 0c1.603.051 2.815 1.387 2.815 ' +
+  '2.951Zm-6.136-1.452a51.196 51.196 0 0 1 3.273 0C14.39 3.05 15 3.684 15 ' +
+  '4.478v.113a49.488 49.488 0 0 0-6 0v-.113c0-.794.609-1.428 1.364-1.452Z' +
+  'm-.355 5.945a.75.75 0 1 0-1.5.058l.347 9a.75.75 0 1 0 1.499-.058l-.346-' +
+  '9Zm5.48.058a.75.75 0 1 0-1.498-.058l-.347 9a.75.75 0 0 0 1.5.058l.345-' +
+  '9Z" clip-rule="evenodd"/></svg>';
+
+function escapeExportText(s) {
+  const d = document.createElement("div");
+  d.textContent = String(s);
+  return d.innerHTML;
+}
+
+// "15 Mar 14:30–15:02" (same day), "15 Mar – 17 Mar" (spans days),
+// or "—" when no range was captured (jobs predating the feature, or
+// clips that couldn't be resolved at enqueue time).
+function formatExportRange(start, end) {
+  if (!start) return "—";
+  const s = new Date(start * 1000);
+  const e = new Date((end || start) * 1000);
+  const dOpts = { day: "numeric", month: "short" };
+  const tOpts = { hour: "2-digit", minute: "2-digit", hour12: false };
+  if (s.toDateString() === e.toDateString()) {
+    const day = s.toLocaleDateString([], dOpts);
+    const st = s.toLocaleTimeString([], tOpts);
+    const et = e.toLocaleTimeString([], tOpts);
+    return st === et ? `${day} ${st}` : `${day} ${st}–${et}`;
+  }
+  return `${s.toLocaleDateString([], dOpts)} – ` +
+    `${e.toLocaleDateString([], dOpts)}`;
+}
+
 function renderExportJobs(jobs) {
   updateExportsSummary(jobs);
   const el = document.getElementById("exports-list");
@@ -1177,8 +1235,8 @@ function renderExportJobs(jobs) {
   table.className = "exports-table";
   table.innerHTML = `
     <thead><tr>
-      <th>ID</th><th>Type</th><th>State</th><th>Progress</th>
-      <th>Created</th><th></th>
+      <th>Type</th><th>Status</th><th>Footage</th>
+      <th class="exports-actions-col"></th>
     </tr></thead>
     <tbody></tbody>
   `;
@@ -1186,35 +1244,65 @@ function renderExportJobs(jobs) {
   const live = state.exportProgress || {};
   for (const j of jobs) {
     const tr = document.createElement("tr");
-    const created = j.created_at
-      ? new Date(j.created_at * 1000).toLocaleString() : "—";
     // Running jobs: prefer the live progress stream if we have
     // one; the DB row is only updated at finish.
     const liveHit = live[j.id];
     const progVal = liveHit && liveHit.progress != null
       ? liveHit.progress
       : j.progress;
-    const terminal = ["done", "failed", "cancelled"].includes(j.state);
-    let pct;
-    if (j.state === "done") pct = "100%";
-    else if (terminal) pct = "—";
-    else pct = progVal != null ? Math.round(progVal * 100) + "%" : "—";
-    const stage = liveHit && liveHit.stage && !terminal
-      ? ` · ${liveHit.stage}` : "";
-    const actions = [];
-    if (j.state === "done") {
-      actions.push(
-        `<a href="/api/exports/${j.id}/download" download>Download</a>`,
-      );
+
+    // Type badge.
+    const label = EXPORT_TYPE_LABELS[j.type] || j.type;
+    const typeCell =
+      `<span class="export-type">${escapeExportText(label)}</span>`;
+
+    // Status: state text, plus an inline progress bar while running
+    // and the error message on failure.
+    let statusCell = `<span class="state-${j.state}">${j.state}</span>`;
+    if (j.state === "failed" && j.error) {
+      statusCell +=
+        `<span class="export-err"> · ${escapeExportText(j.error)}</span>`;
     }
-    actions.push(`<button type="button" class="export-delete" data-id="${j.id}">Delete</button>`);
+    if (j.state === "running") {
+      const pct = progVal != null ? Math.round(progVal * 100) : 0;
+      const stage = liveHit && liveHit.stage ? ` · ${liveHit.stage}` : "";
+      statusCell +=
+        `<div class="export-progress" role="progressbar" ` +
+        `aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100">` +
+        `<div class="export-progress-fill" style="width:${pct}%"></div>` +
+        `</div><span class="export-stage">${pct}%` +
+        `${escapeExportText(stage)}</span>`;
+    }
+
+    // Footage: captured date range + clip count.
+    const range = formatExportRange(j.clip_start, j.clip_end);
+    const n = j.clip_count || 0;
+    const footageCell = range === "—"
+      ? '<span class="export-count">—</span>'
+      : `${escapeExportText(range)}` +
+        (n ? `<span class="export-count"> · ${n} ` +
+          `clip${n === 1 ? "" : "s"}</span>` : "");
+
+    // Actions: download (when ready) + delete. The download slot is
+    // always reserved — an invisible placeholder when there's no
+    // download — so the bin stays pinned to the right and never
+    // jumps across as jobs finish.
+    const dl = j.state === "done"
+      ? `<a class="export-action" href="/api/exports/${j.id}/download" ` +
+        `download title="Download" aria-label="Download export">` +
+        `${EXPORT_ICON_DOWNLOAD}</a>`
+      : `<span class="export-action export-action--empty" ` +
+        `aria-hidden="true"></span>`;
+    const del =
+      `<button type="button" class="export-action export-delete" ` +
+      `data-id="${j.id}" title="Delete" aria-label="Delete export">` +
+      `${EXPORT_ICON_TRASH}</button>`;
+
     tr.innerHTML = `
-      <td>${j.id}</td>
-      <td>${j.type}</td>
-      <td class="state-${j.state}">${j.state}${j.error ? " · " + j.error : ""}</td>
-      <td>${pct}${stage}</td>
-      <td>${created}</td>
-      <td>${actions.join(" · ")}</td>
+      <td>${typeCell}</td>
+      <td class="export-status">${statusCell}</td>
+      <td class="export-footage">${footageCell}</td>
+      <td class="export-actions">${dl}${del}</td>
     `;
     tbody.appendChild(tr);
   }

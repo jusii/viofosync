@@ -144,7 +144,9 @@ CREATE TABLE IF NOT EXISTS export_jobs (
     error         TEXT,
     created_at    INTEGER NOT NULL,
     started_at    INTEGER,
-    finished_at   INTEGER
+    finished_at   INTEGER,
+    clip_start    INTEGER,            -- min source-clip timestamp (unix s)
+    clip_end      INTEGER             -- max source-clip timestamp (unix s)
 );
 
 CREATE TABLE IF NOT EXISTS kv (
@@ -214,6 +216,12 @@ class Database:
             "UPDATE clip_index SET gps_examined = 1 "
             "WHERE has_gpx = 1 AND gps_examined = 0"
         )
+
+        # Date range of an export's source clips, snapshotted at
+        # enqueue time so the export list can show it after the
+        # underlying clips are retention-pruned.
+        _add_column("export_jobs", "clip_start", "INTEGER")
+        _add_column("export_jobs", "clip_end", "INTEGER")
 
     @contextmanager
     def conn(self) -> Iterator[sqlite3.Connection]:

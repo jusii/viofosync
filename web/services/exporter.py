@@ -276,13 +276,23 @@ class ExportWorker:
             "encoder": encoder,
         })
         with self.db.write() as c:
+            # Snapshot the footage date range now — the source clips
+            # may be retention-pruned long before the export is.
+            ph = ",".join("?" * len(clip_ids))
+            rng = c.execute(
+                f"SELECT MIN(timestamp) AS lo, MAX(timestamp) AS hi "
+                f"FROM clip_index WHERE id IN ({ph})",
+                clip_ids,
+            ).fetchone()
             cur = c.execute(
                 """
                 INSERT INTO export_jobs
-                    (type, clip_ids, state, created_at)
-                VALUES (?, ?, 'queued', ?)
+                    (type, clip_ids, state, created_at,
+                     clip_start, clip_end)
+                VALUES (?, ?, 'queued', ?, ?, ?)
                 """,
-                (job_type, payload, int(time.time())),
+                (job_type, payload, int(time.time()),
+                 rng["lo"], rng["hi"]),
             )
             return cur.lastrowid
 
