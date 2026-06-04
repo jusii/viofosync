@@ -460,8 +460,13 @@ class ExportWorker:
         ) as f:
             list_file = f.name
             for c in clips:
-                # Escape single quotes per ffmpeg concat docs.
-                safe = c["path"].replace("'", "'\\''")
+                # Absolute path: ffmpeg's concat demuxer resolves
+                # relative entries against the list file's own
+                # directory (the temp dir), not our CWD — so a
+                # relative clip path (dev boxes with a relative
+                # RECORDINGS) would send ffmpeg looking in /tmp.
+                # Escape single quotes per the ffmpeg concat docs.
+                safe = os.path.abspath(c["path"]).replace("'", "'\\''")
                 f.write(f"file '{safe}'\n")
 
         try:
