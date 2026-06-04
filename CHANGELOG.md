@@ -3,6 +3,15 @@
 ## Unreleased
 
 ### Added
+- Optional **Alternative address** for the same camera (Settings →
+  Dashcam, setting `ADDRESS_FALLBACK`). The primary is always tried
+  first; the alternative is used only when the primary is unreachable,
+  and sync returns to the primary automatically. Intended for reaching
+  one dashcam over a VPN (e.g. a Raspberry Pi hotspot, or a site-to-site
+  VPN to a second parking location) — not for a second camera. A new
+  Home Assistant `dashcam_connection` sensor reports `primary` /
+  `alternative` / `offline` with the live address as an attribute, and
+  the web UI shows a "via alternative" chip while on the fallback.
 - MQTT publishing with Home Assistant auto-discovery. New Settings
   panel exposes broker host/port/credentials, TLS, topic prefix, and
   discovery prefix. Publishes 12 sensor/binary_sensor entities and 6

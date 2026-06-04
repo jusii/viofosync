@@ -353,3 +353,46 @@ def test_state_download_speed_none_when_avg_unavailable():
     assert state_download_speed(hub, None, _stub_snapshot()) is None
 
 
+# ---- dashcam connection sensor
+
+def test_state_dashcam_connection_online_primary():
+    from web.services.mqtt_state import state_dashcam_connection
+    hub = _hub_with_state({"dashcam_online": True, "dashcam_source": "primary"})
+    assert state_dashcam_connection(hub, None, _stub_snapshot()) == "primary"
+
+
+def test_state_dashcam_connection_online_alternative():
+    from web.services.mqtt_state import state_dashcam_connection
+    hub = _hub_with_state(
+        {"dashcam_online": True, "dashcam_source": "alternative"})
+    assert state_dashcam_connection(
+        hub, None, _stub_snapshot(address_fallback="10.0.0.2")) == "alternative"
+
+
+def test_state_dashcam_connection_offline():
+    from web.services.mqtt_state import state_dashcam_connection
+    hub = _hub_with_state(
+        {"dashcam_online": False, "dashcam_source": "primary"})
+    assert state_dashcam_connection(hub, None, _stub_snapshot()) == "offline"
+
+
+def test_state_dashcam_connection_unknown_when_never_probed():
+    from web.services.mqtt_state import state_dashcam_connection
+    hub = _hub_with_state({"dashcam_online": None})
+    assert state_dashcam_connection(hub, None, _stub_snapshot()) is None
+
+
+def test_state_dashcam_connection_unknown_when_no_address():
+    from web.services.mqtt_state import state_dashcam_connection
+    hub = _hub_with_state({"dashcam_online": True, "dashcam_source": "primary"})
+    snap = _stub_snapshot(address=None, address_fallback=None)
+    assert state_dashcam_connection(hub, None, snap) is None
+
+
+def test_attrs_dashcam_connection_reports_live_address():
+    from web.services.mqtt_state import attrs_dashcam_connection
+    hub = _hub_with_state({"dashcam_address": "10.0.0.2"})
+    assert attrs_dashcam_connection(hub, None, _stub_snapshot()) == {
+        "address": "10.0.0.2"}
+
+

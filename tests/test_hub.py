@@ -263,6 +263,31 @@ async def test_hub_rebroadcasts_when_reason_changes_but_status_does_not() -> Non
     assert hub.last_state["sync_status_reason"] == "disk 99% full"
 
 
+async def test_dashcam_online_stores_source_and_address() -> None:
+    hub = Hub()
+    await hub.broadcast({
+        "type": "dashcam_online", "source": "alternative",
+        "address": "10.0.0.2",
+    })
+    assert hub.last_state["dashcam_online"] is True
+    assert hub.last_state["dashcam_source"] == "alternative"
+    assert hub.last_state["dashcam_address"] == "10.0.0.2"
+
+
+async def test_dashcam_offline_keeps_last_source() -> None:
+    hub = Hub()
+    await hub.broadcast({
+        "type": "dashcam_online", "source": "alternative",
+        "address": "10.0.0.2",
+    })
+    await hub.broadcast({"type": "dashcam_offline"})
+    assert hub.last_state["dashcam_online"] is False
+    # Source/address are retained so the HA sensor reads "offline"
+    # without losing which address was last live.
+    assert hub.last_state["dashcam_source"] == "alternative"
+    assert hub.last_state["dashcam_address"] == "10.0.0.2"
+
+
 async def test_hub_compute_exception_does_not_break_broadcast() -> None:
     """If status computation raises, the upstream event still propagates
     and no sync_status event is emitted."""

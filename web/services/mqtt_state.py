@@ -38,6 +38,25 @@ def state_dashcam(hub, db, snapshot) -> Optional[str]:
     return "ON" if val else "OFF"
 
 
+def state_dashcam_connection(hub, db, snapshot) -> Optional[str]:
+    """Which address the dashcam is reached through: ``primary`` /
+    ``alternative`` / ``offline``. ``None`` (Unknown) when no address is
+    configured or the camera has never been probed this run."""
+    if not (snapshot.address or getattr(snapshot, "address_fallback", None)):
+        return None
+    online = hub.last_state.get("dashcam_online")
+    if online is None:
+        return None
+    if not online:
+        return "offline"
+    return hub.last_state.get("dashcam_source") or "primary"
+
+
+def attrs_dashcam_connection(hub, db, snapshot) -> Optional[dict]:
+    """JSON attributes for the connection sensor — the live address."""
+    return {"address": hub.last_state.get("dashcam_address")}
+
+
 def state_sync_status(hub, db, snapshot) -> Optional[str]:
     """The four-state unified status string. See sync_status.py."""
     state, _reason = compute_sync_status(hub, db, snapshot)

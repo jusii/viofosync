@@ -41,6 +41,7 @@ class Snapshot:
     """Immutable view of every setting the running app may need."""
 
     address: str | None
+    address_fallback: str | None
     recordings: str
     grouping: str
     use_html_listing: bool
@@ -223,6 +224,7 @@ class SettingsProvider:
         m = SettingsModel(**merged)
         return Snapshot(
             address=m.ADDRESS,
+            address_fallback=m.ADDRESS_FALLBACK,
             recordings=self._recordings,
             grouping=m.GROUPING,
             use_html_listing=m.HTML,

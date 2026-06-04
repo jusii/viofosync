@@ -29,6 +29,25 @@ def test_address_must_look_like_hostname_or_ip() -> None:
         SettingsModel(**{**DEFAULT_VALUES, "ADDRESS": "not a host"})
 
 
+def test_address_fallback_validates_like_address() -> None:
+    SettingsModel(**{**DEFAULT_VALUES, "ADDRESS_FALLBACK": "192.168.2.230"})
+    SettingsModel(**{**DEFAULT_VALUES, "ADDRESS_FALLBACK": "dashcam.vpn"})
+    SettingsModel(**{**DEFAULT_VALUES, "ADDRESS_FALLBACK": None})   # unset is fine
+    SettingsModel(**{**DEFAULT_VALUES, "ADDRESS_FALLBACK": ""})     # empty → None
+
+    with pytest.raises(ValueError):
+        SettingsModel(**{**DEFAULT_VALUES, "ADDRESS_FALLBACK": "not a host"})
+
+
+def test_address_fallback_is_editable() -> None:
+    assert "ADDRESS_FALLBACK" in EDITABLE_KEYS
+
+
+def test_address_fallback_empty_becomes_none() -> None:
+    m = SettingsModel(**{**DEFAULT_VALUES, "ADDRESS_FALLBACK": ""})
+    assert m.ADDRESS_FALLBACK is None
+
+
 def test_grouping_enum_rejects_unknown() -> None:
     with pytest.raises(ValueError):
         SettingsModel(**{**DEFAULT_VALUES, "GROUPING": "hourly"})

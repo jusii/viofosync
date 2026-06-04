@@ -32,6 +32,7 @@ def _editable_values(snap) -> dict[str, Any]:
     """Project the snapshot into the env-style key map (UI's contract)."""
     return {
         "ADDRESS": snap.address or "",
+        "ADDRESS_FALLBACK": snap.address_fallback or "",
         "GROUPING": snap.grouping,
         "HTML": snap.use_html_listing,
         "GPS_EXTRACT": snap.gps_extract,

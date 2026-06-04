@@ -279,6 +279,10 @@ class SyncWorker:
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._running_cycle = False
         self._current_filename: Optional[str] = None
+        # The address chosen for the in-flight cycle (primary or the
+        # alternative). Selected once per cycle and held for the whole
+        # drain — no mid-download switching. None when offline.
+        self._active_address: Optional[str] = None
         # Tracks the kind of sync_error currently sticky on the hub, so
         # we can emit clear signals only when a previously-set error
         # actually changes.
@@ -498,24 +502,32 @@ class SyncWorker:
 
     # ---- probe ----
 
-    async def _probe(self) -> bool:
-        """3-second TCP probe to the dashcam. True = reachable."""
-        snap = self._provider.get()
-        if not snap.address:
-            return False
+    async def _probe_one(self, address: str) -> bool:
+        """3-second TCP probe to one address on port 80. True = reachable."""
         loop = asyncio.get_running_loop()
-        address = snap.address
 
         def _sync():
             try:
-                with socket.create_connection(
-                    (address, 80), timeout=3.0
-                ):
+                with socket.create_connection((address, 80), timeout=3.0):
                     return True
             except OSError:
                 return False
 
         return await loop.run_in_executor(None, _sync)
+
+    async def _select_active_address(self) -> tuple[Optional[str], str]:
+        """Pick the address for this cycle: primary first, then the
+        alternative. Returns ``(address, source)`` with source one of
+        ``"primary"``, ``"alternative"``, or ``"offline"`` (address None).
+        """
+        snap = self._provider.get()
+        for source, address in (
+            ("primary", snap.address),
+            ("alternative", snap.address_fallback),
+        ):
+            if address and await self._probe_one(address):
+                return address, source
+        return None, "offline"
 
     # ---- one cycle ----
 
@@ -555,11 +567,16 @@ class SyncWorker:
         await self._emit_disk_pct()
         if not await self._check_recordings_writable():
             return False
-        reachable = await self._probe()
-        await self.hub.broadcast({
-            "type": "dashcam_online" if reachable else "dashcam_offline",
-        })
-        if not reachable:
+        active, source = await self._select_active_address()
+        self._active_address = active
+        if active is not None:
+            await self.hub.broadcast({
+                "type": "dashcam_online",
+                "source": source,
+                "address": active,
+            })
+        else:
+            await self.hub.broadcast({"type": "dashcam_offline"})
             return False
 
         # Initial listing — failure here aborts the cycle so
@@ -587,7 +604,7 @@ class SyncWorker:
                 break
             # Re-probe occasionally so we don't burn a whole
             # retry budget on a dashcam that's already gone.
-            if did_any and not await self._probe():
+            if did_any and not await self._probe_one(self._active_address):
                 await self.hub.broadcast({
                     "type": "dashcam_offline",
                 })
@@ -645,7 +662,7 @@ class SyncWorker:
 
     def _fetch_listing(self):
         snap = self._provider.get()
-        base = f"http://{snap.address}"
+        base = f"http://{self._active_address}"
         if snap.use_html_listing:
             return vfs.get_dashcam_filenames_html(base)
         return vfs.get_dashcam_filenames(base)
@@ -690,7 +707,7 @@ class SyncWorker:
                 datetime=recorded,
                 attr=None,
             )
-            base = f"http://{snap.address}"
+            base = f"http://{self._active_address}"
             try:
                 ok, _ = vfs.download_file_with(
                     base, rec, snap.recordings,

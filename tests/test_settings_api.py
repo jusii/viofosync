@@ -140,3 +140,13 @@ def test_put_delete_after_download_persists(authed_client) -> None:
     assert r.json()["editable"]["DELETE_AFTER_DOWNLOAD"] is True
     r = authed_client.get("/api/settings")
     assert r.json()["editable"]["DELETE_AFTER_DOWNLOAD"] is True
+
+
+def test_address_fallback_round_trips(authed_client) -> None:
+    # PUT the fallback, then GET it back through the editable projection.
+    put = authed_client.put("/api/settings", json={"ADDRESS_FALLBACK": "10.0.0.9"})
+    assert put.status_code == 200
+    assert put.json()["editable"]["ADDRESS_FALLBACK"] == "10.0.0.9"
+
+    got = authed_client.get("/api/settings")
+    assert got.json()["editable"]["ADDRESS_FALLBACK"] == "10.0.0.9"

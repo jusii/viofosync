@@ -1734,6 +1734,8 @@ function handleEvent(ev) {
         state.syncRunning = ev.state.sync_state.running;
         state.syncPaused = ev.state.sync_state.paused;
       }
+      state.dashcamSource = ev.state.dashcam_source || "primary";
+      updateConnectionChip();
       break;
     case "sync_status":
       applyStatus(ev.status, ev.reason);
@@ -1744,9 +1746,12 @@ function handleEvent(ev) {
       // Status follow-up will arrive separately; don't drive the badge here.
       break;
     case "dashcam_online":
+      state.dashcamSource = ev.source || "primary";
+      updateConnectionChip();
+      break;
     case "dashcam_offline":
-      // Connection events are still logged but no longer drive the badge.
-      // The follow-up sync_status event handles UI updates.
+      // Keep state.dashcamSource (last known) so the chip persists.
+      updateConnectionChip();
       break;
     case "item_started":
       updateCurrent({ filename: ev.filename, total: ev.total, bytes: 0 });
@@ -1847,6 +1852,24 @@ function updateSessionStats(s) {
   parts.push(`${fmtBytes(s.session_bytes)} this session`);
   el.textContent = "Session · " + parts.join(" · ");
   el.hidden = false;
+}
+
+function updateConnectionChip() {
+  let chip = document.getElementById("conn-chip");
+  const onAlt = state.dashcamSource === "alternative";
+  if (!onAlt) {
+    if (chip) chip.remove();
+    return;
+  }
+  if (!chip) {
+    chip = document.createElement("span");
+    chip.id = "conn-chip";
+    chip.className = "kind-badge";
+    chip.title = "Connected to the camera via the alternative address";
+    chip.textContent = "via alternative";
+    const anchor = document.getElementById("sync-status");
+    if (anchor) anchor.insertAdjacentElement("beforebegin", chip);
+  }
 }
 
 // ---------- Settings ----------
@@ -2036,6 +2059,55 @@ function renderDashcamSection(pane) {
   row.appendChild(wrap);
   row.appendChild(result);
   pane.appendChild(row);
+
+  const altRow = document.createElement("div");
+  altRow.className = "form-row";
+  const altLbl = document.createElement("label");
+  altLbl.textContent = "Alternative address";
+  altRow.appendChild(altLbl);
+  const altWrap = document.createElement("div");
+  altWrap.style.display = "flex";
+  altWrap.style.gap = "8px";
+  const altInp = textInput("ADDRESS_FALLBACK");
+  altWrap.appendChild(altInp);
+  const altTest = document.createElement("button");
+  altTest.type = "button";
+  altTest.textContent = "Test";
+  const altResult = document.createElement("span");
+  altResult.className = "hint";
+  altResult.style.margin = "0";
+  altTest.addEventListener("click", async () => {
+    altResult.textContent = "Testing…";
+    try {
+      const j = await api("/api/settings/test-dashcam", {
+        method: "POST",
+        body: JSON.stringify({ address: altInp.value }),
+      });
+      altResult.textContent = j.ok
+        ? `Reachable (${j.latency_ms}ms)`
+        : `Failed: ${j.error}`;
+    } catch (e) {
+      altResult.textContent = `Failed: ${e.message || e}`;
+    }
+  });
+  altWrap.appendChild(altTest);
+  altRow.appendChild(altWrap);
+
+  // Help text lives inside the field's form-row (like the Test result
+  // below it) so it's grouped with the field and constrained to the
+  // field width, rather than dangling as a wider detached paragraph.
+  // margin:0 lets the row's flex gap own the spacing.
+  const altNote = document.createElement("p");
+  altNote.className = "hint";
+  altNote.style.margin = "0";
+  altNote.textContent =
+    "Optional second IP/host for the SAME camera, used only when the " +
+    "primary is unreachable — for example downloading over a VPN when the " +
+    "car is parked elsewhere. NOT for a second camera.";
+  altRow.appendChild(altNote);
+
+  altRow.appendChild(altResult);
+  pane.appendChild(altRow);
 
   renderField(pane, "HTML", "Use HTML directory listing", checkbox("HTML"));
   const htmlNote = document.createElement("p");

@@ -58,6 +58,25 @@ The only Docker-level env vars are:
 
 App-level settings (sync interval, dashcam IP, encoder, geocoding email, web port, retention, password, auto-delete, etc.) are editable on the **Settings** page. Advanced users can hand-edit `/config/config.json` between restarts; the schema lives in `[web/settings_schema.py](web/settings_schema.py)`.
 
+## Alternative camera address
+
+You can set an optional **Alternative address** (Settings → Dashcam) — a
+second IP/host for the **same** dashcam. It is **not** for a second
+camera. The primary address is always tried first; the alternative is
+used only when the primary is unreachable, and sync returns to the
+primary automatically once it is back.
+
+This is for reaching one camera at more than one address depending on
+where the car is, for example:
+
+- A Raspberry Pi running a VPN hotspot, so you can reach the dashcam
+  remotely when the car is parked away from home.
+- A site-to-site VPN to a second location the car is regularly parked
+  at, where the camera sits on a different subnet/IP.
+
+The alternative uses the same form as the primary (IP or hostname, plain
+`http`, port 80).
+
 ## Home Assistant via MQTT
 
 viofosync can publish state and accept actions over MQTT, with full
@@ -83,7 +102,9 @@ When MQTT is on, viofosync publishes:
 
 ### Sensors and buttons
 
-Enabled by default in HA: dashcam connectivity, sync status
+Enabled by default in HA: dashcam connectivity, dashcam connection
+(`primary` / `alternative` / `offline`, with the live address as an
+`address` attribute), sync status
 (`stopped` / `idle` / `paused` / `downloading`), queue pending, last
 downloaded clip, disk used, and six action buttons
 (start/pause/skip/refresh/retry-failed/rescan).

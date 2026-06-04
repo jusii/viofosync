@@ -40,6 +40,8 @@ class Hub:
         # waiting for the next event.
         self.last_state: Dict[str, Any] = {
             "dashcam_online": None,
+            "dashcam_source": None,
+            "dashcam_address": None,
             "current_item": None,
             # Session-wide download stats (see download_session.py). Always
             # present so the WS snapshot and MQTT state_fn never KeyError.
@@ -90,6 +92,8 @@ class Hub:
         t = event.get("type")
         if t == "dashcam_online":
             self.last_state["dashcam_online"] = True
+            self.last_state["dashcam_source"] = event.get("source")
+            self.last_state["dashcam_address"] = event.get("address")
         elif t == "dashcam_offline":
             self.last_state["dashcam_online"] = False
         elif t == "item_started":

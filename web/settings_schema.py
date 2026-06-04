@@ -28,6 +28,7 @@ class SettingsModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     ADDRESS: str | None = None
+    ADDRESS_FALLBACK: str | None = None
     WEB_PASSWORD_HASH: str = ""
     SESSION_SECRET: str = Field(default_factory=lambda: secrets.token_hex(32))
 
@@ -80,7 +81,7 @@ class SettingsModel(BaseModel):
     MQTT_DISCOVERY_ENABLED: bool = True
     MQTT_QOS: Literal[0, 1, 2] = 1
 
-    @field_validator("ADDRESS")
+    @field_validator("ADDRESS", "ADDRESS_FALLBACK")
     @classmethod
     def _validate_address(cls, v: str | None) -> str | None:
         if v is None or v == "":
@@ -148,7 +149,8 @@ class SettingsModel(BaseModel):
 
 # Public taxonomy used by the API + UI.
 EDITABLE_KEYS = {
-    "ADDRESS", "GROUPING", "HTML", "GPS_EXTRACT", "DELETE_AFTER_DOWNLOAD",
+    "ADDRESS", "ADDRESS_FALLBACK", "GROUPING", "HTML", "GPS_EXTRACT",
+    "DELETE_AFTER_DOWNLOAD",
     "TIMEOUT", "DOWNLOAD_ATTEMPTS", "MAX_DOWNLOAD_ATTEMPTS", "SYNC_INTERVAL",
     "ENABLE_SCHEDULED_SYNC", "WEB_HOST", "WEB_PORT", "EXPORT_ENCODER",
     "NOMINATIM_EMAIL", "GEOCODE_ENABLED",
