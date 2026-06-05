@@ -33,6 +33,7 @@
       <nav aria-label="Primary">
         <a href="#/archive" data-tab="archive">Archive</a>
         <a href="#/downloads" data-tab="downloads">Downloads</a>
+        <a href="#/logs" data-tab="logs">Logs</a>
       </nav>
       <div class="spacer"></div>
       <span id="sync-status" class="status" aria-live="polite"></span>
@@ -170,11 +171,6 @@
         </div>
         <div id="queue-meta" class="queue-meta"></div>
         <div id="queue-days"></div>
-
-        <details id="log-panel" class="log-panel">
-          <summary>Event log</summary>
-          <div id="log-entries" class="log-entries"></div>
-        </details>
       </section>
 
       <section id="view-settings" class="tab" hidden>
@@ -188,7 +184,7 @@
             <a href="#/settings/web" class="settings-nav-link" data-section="web">Web server</a>
             <a href="#/settings/security" class="settings-nav-link" data-section="security">Security</a>
             <a href="#/settings/system" class="settings-nav-link" data-section="system">System</a>
-            <a href="#/settings/mqtt" class="settings-nav-link" data-section="mqtt">MQTT</a>
+            <a href="#/settings/mqtt" class="settings-nav-link" data-section="mqtt">MQTT (Home Assistant)</a>
           </aside>
           <div class="settings-pane" id="settings-pane">
             <p class="hint">Loading…</p>
@@ -199,6 +195,30 @@
           <button type="button" id="settings-discard">Discard</button>
           <button type="button" id="settings-save" class="primary">Save</button>
         </footer>
+      </section>
+
+      <section id="view-logs" class="tab" hidden>
+        <div class="view-header">
+          <h2>Logs</h2>
+        </div>
+        <div class="logs-toolbar">
+          <label class="logs-level-label">Level
+            <select id="logs-level">
+              <option value="INFO">Info</option>
+              <option value="WARNING" selected>Warning</option>
+              <option value="ERROR">Error</option>
+            </select>
+          </label>
+          <input type="search" id="logs-logger"
+                 placeholder="Logger (e.g. sync_worker)" />
+          <input type="search" id="logs-q" placeholder="Search message…" />
+          <div class="spacer"></div>
+          <button type="button" id="logs-refresh">Refresh</button>
+        </div>
+        <div id="logs-list" class="logs-list" aria-live="off"></div>
+        <div class="logs-footer">
+          <button type="button" id="logs-older">Load older</button>
+        </div>
       </section>
     </main>
 

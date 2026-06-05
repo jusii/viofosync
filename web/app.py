@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import logging
 import os
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 
 from fastapi import FastAPI
 from fastapi.responses import FileResponse, Response
@@ -33,6 +33,7 @@ from .routers import mqtt as mqtt_router
 from .routers import setup as setup_router
 from .routers import storage as storage_router
 from .routers import imports as imports_router
+from .routers import logs as logs_router
 from .services import retention as _ret_mod
 from .services import scanner
 from .services.exporter import (
@@ -43,6 +44,7 @@ from .services.exporter import (
 from .services.geocode import GeocodeService
 from .services.download_session import DownloadSession
 from .services.hub import Hub
+from .services.log_store import DBLogHandler
 from .services.mqtt import MqttService
 from .services.sync_worker import SyncWorker
 from .setup_mode import SetupModeMiddleware
@@ -151,6 +153,17 @@ async def lifespan(app: FastAPI):
         settings_provider=provider,
         session=app.state.download_session,
     )
+    # Now that db + hub + loop exist, let the log handler persist and
+    # live-broadcast records. Records logged earlier in startup were
+    # buffered by the handler and flush when the drain task starts.
+    log_handler = getattr(app.state, "log_handler", None)
+    if log_handler is not None:
+        log_handler.bind(
+            app.state.db,
+            app.state.hub.broadcast,
+            asyncio.get_running_loop(),
+        )
+        app.state.log_drain_task = asyncio.create_task(log_handler.run())
     # Compute initial sync_status so the very first WebSocket snapshot
     # and the first MQTT publish carry the right value without waiting
     # for the sync worker's first cycle.
@@ -226,6 +239,18 @@ async def lifespan(app: FastAPI):
                 task.cancel()
         await app.state.sync_worker.stop()
         await app.state.export_worker.stop()
+        drain = getattr(app.state, "log_drain_task", None)
+        if drain is not None and not drain.done():
+            drain.cancel()
+            # Await the cancellation so the task unwinds before the loop
+            # tears down — bare cancel() only stays warning-clean while
+            # run() happens to be parked in queue.get(); awaiting it makes
+            # that independent of where cancellation lands.
+            with suppress(asyncio.CancelledError):
+                await drain
+        log_handler = getattr(app.state, "log_handler", None)
+        if log_handler is not None:
+            logging.getLogger().removeHandler(log_handler)
 
 
 def create_app() -> FastAPI:
@@ -246,6 +271,15 @@ def create_app() -> FastAPI:
         redoc_url=None,
     )
 
+    # Persist INFO+ from our loggers (and WARNING+ from everything) into
+    # the app_log table for the Logs tab. The handler only enqueues here;
+    # lifespan binds the DB/hub/loop and starts the drain task. basicConfig
+    # above ran with force=True, so any handler from a previous create_app
+    # (in tests) was already removed — no accumulation.
+    log_handler = DBLogHandler()
+    logging.getLogger().addHandler(log_handler)
+    app.state.log_handler = log_handler
+
     app.add_middleware(SetupModeMiddleware)
 
     app.include_router(auth_router.router)
@@ -258,6 +292,7 @@ def create_app() -> FastAPI:
     app.include_router(mqtt_router.router)
     app.include_router(storage_router.router)
     app.include_router(imports_router.router)
+    app.include_router(logs_router.router)
 
     # Static SPA — served at / with an explicit index.html fall-through
     # so the SPA's hash-router owns everything that isn't /api/*.

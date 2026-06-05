@@ -31,6 +31,8 @@ const state = {
   // helpers (fmtDistance) don't need to read from settingsState
   // (which is only loaded when the Settings tab is visited).
   distanceUnits: "km",
+  logsFilter: null,        // { level, logger, q } currently shown in Logs tab
+  logsOldestId: null,      // smallest id loaded, for "Load older" pagination
 };
 
 // ---------- CSS variable bridge ----------
@@ -237,6 +239,8 @@ function routeTo(hash) {
   });
   document.getElementById("view-archive").hidden = tab !== "archive";
   document.getElementById("view-downloads").hidden = tab !== "downloads";
+  const logsView = document.getElementById("view-logs");
+  if (logsView) logsView.hidden = tab !== "logs";
   const settingsView = document.getElementById("view-settings");
   if (settingsView) settingsView.hidden = tab !== "settings";
   if (tab === "archive") {
@@ -247,6 +251,7 @@ function routeTo(hash) {
     stopArchiveAutoRefresh();
   }
   if (tab === "downloads") loadQueue();
+  if (tab === "logs") loadLogs();
   if (tab === "settings") loadSettings();
 }
 
@@ -1981,6 +1986,152 @@ function refreshQueueIfVisible() {
   }
 }
 
+// ---------- Logs tab ----------
+
+const LOG_LEVELNO = {
+  DEBUG: 10, INFO: 20, WARNING: 30, ERROR: 40, CRITICAL: 50,
+};
+const LOGS_PAGE = 200;       // server page size for history fetches
+const LOGS_MAX_ROWS = 1000;  // cap live-tail DOM growth over a long session
+
+function logsFilterParams() {
+  return {
+    level: document.getElementById("logs-level").value,
+    logger: document.getElementById("logs-logger").value.trim(),
+    q: document.getElementById("logs-q").value.trim(),
+  };
+}
+
+function logsQueryString(f, extra = {}) {
+  const params = new URLSearchParams({ level: f.level, limit: String(LOGS_PAGE), ...extra });
+  if (f.logger) params.set("logger", f.logger);
+  if (f.q) params.set("q", f.q);
+  return params.toString();
+}
+
+function renderLogRow(e) {
+  const row = document.createElement("div");
+  row.className = "log-line log-" + (e.level || "").toLowerCase();
+  row.dataset.id = e.id;
+
+  const head = document.createElement("div");
+  head.className = "log-head";
+
+  const ts = document.createElement("span");
+  ts.className = "log-ts";
+  ts.textContent = new Date(e.ts * 1000).toLocaleTimeString();
+
+  const lvl = document.createElement("span");
+  lvl.className = "log-level";
+  lvl.textContent = e.level;
+
+  const logger = document.createElement("span");
+  logger.className = "log-logger";
+  logger.textContent = e.logger;
+
+  const msg = document.createElement("span");
+  msg.className = "log-msg";
+  msg.textContent = e.message;
+
+  head.append(ts, lvl, logger, msg);
+  row.appendChild(head);
+
+  if (e.exc_text) {
+    head.classList.add("has-exc");
+    head.addEventListener("click", () => row.classList.toggle("open"));
+    const pre = document.createElement("pre");
+    pre.className = "log-exc";
+    pre.textContent = e.exc_text;
+    row.appendChild(pre);
+  }
+  return row;
+}
+
+async function loadLogs() {
+  const f = logsFilterParams();
+  state.logsFilter = f;
+  const list = document.getElementById("logs-list");
+  const older = document.getElementById("logs-older");
+  list.innerHTML = "";
+  let entries = [];
+  try {
+    entries = (await api(`/api/logs?${logsQueryString(f)}`)).entries;
+  } catch { return; }
+  if (!entries.length) {
+    const empty = document.createElement("div");
+    empty.className = "logs-empty";
+    empty.textContent = "No log entries match the current filter.";
+    list.appendChild(empty);
+  } else {
+    for (const e of entries) list.appendChild(renderLogRow(e));
+  }
+  state.logsOldestId = entries.length ? entries[entries.length - 1].id : null;
+  // A short page means there is no older history behind it.
+  if (older) {
+    const more = entries.length >= LOGS_PAGE;
+    older.disabled = !more;
+    older.textContent = more ? "Load older" : "No older entries";
+  }
+}
+
+async function loadOlderLogs() {
+  if (!state.logsOldestId) return;
+  const f = state.logsFilter || logsFilterParams();
+  const qs = logsQueryString(f, { before: String(state.logsOldestId) });
+  const older = document.getElementById("logs-older");
+  let entries = [];
+  try { entries = (await api(`/api/logs?${qs}`)).entries; }
+  catch { return; }
+  const list = document.getElementById("logs-list");
+  for (const e of entries) list.appendChild(renderLogRow(e));
+  if (entries.length) state.logsOldestId = entries[entries.length - 1].id;
+  if (older && entries.length < LOGS_PAGE) {
+    older.disabled = true;
+    older.textContent = "No older entries";
+  }
+}
+
+function logMatchesFilter(e, f) {
+  const min = LOG_LEVELNO[f.level] || 30;
+  const lvl = e.levelno || LOG_LEVELNO[e.level] || 0;
+  if (lvl < min) return false;
+  if (f.logger && !(e.logger || "").includes(f.logger)) return false;
+  if (f.q && !(e.message || "").toLowerCase().includes(f.q.toLowerCase())) {
+    return false;
+  }
+  return true;
+}
+
+function logsLive(e) {
+  const view = document.getElementById("view-logs");
+  const list = document.getElementById("logs-list");
+  if (!list || !view || view.hidden) return;
+  // NB: state.logsFilter only resyncs when loadLogs() runs (on a toolbar
+  // `change` or Refresh), so for a few seconds after editing a search box
+  // (which commits on blur/Enter) live rows are matched against the prior
+  // filter; loadLogs() re-renders cleanly on commit.
+  const f = state.logsFilter || logsFilterParams();
+  if (!logMatchesFilter(e, f)) return;
+  const placeholder = list.querySelector(".logs-empty");
+  if (placeholder) placeholder.remove();
+  const atTop = list.scrollTop <= 4;
+  list.insertBefore(renderLogRow(e), list.firstChild);
+  if (atTop) list.scrollTop = 0;
+  // Bound live-tail growth (the old event-log panel capped at 200). Trim the
+  // oldest rows and keep logsOldestId at the oldest visible id so paging stays
+  // contiguous.
+  if (list.children.length > LOGS_MAX_ROWS) {
+    while (list.children.length > LOGS_MAX_ROWS) list.removeChild(list.lastChild);
+    if (list.lastChild) state.logsOldestId = Number(list.lastChild.dataset.id);
+  }
+}
+
+document.getElementById("logs-refresh").addEventListener("click", loadLogs);
+document.getElementById("logs-older").addEventListener("click", loadOlderLogs);
+for (const id of ["logs-level", "logs-logger", "logs-q"]) {
+  document.getElementById(id).addEventListener("change", loadLogs);
+}
+
 function openSocket() {
   if (state.ws) { try { state.ws.close(); } catch {} }
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
@@ -1993,49 +2144,7 @@ function openSocket() {
   });
 }
 
-const MAX_LOG_ENTRIES = 200;
-
-function appendLog(ev) {
-  const container = document.getElementById("log-entries");
-  if (!container) return;
-  // Per-chunk progress is already shown live in the progress bar
-  // above (downloads) or the Export jobs table (exports); mirroring
-  // it in the log buries everything else.
-  if (ev.type === "item_progress" || ev.type === "export_progress"
-      || ev.type === "session_stats") return;
-  const line = document.createElement("div");
-  line.className = "log-line";
-  const ts = new Date().toLocaleTimeString();
-  let detail = ev.type;
-  if (ev.type === "item_started") detail = `item_started: ${ev.filename}`;
-  else if (ev.type === "item_finished") detail = `item_finished: ${ev.filename} ${ev.ok ? "ok" : ev.error || "failed"}`;
-  else if (ev.type === "sync_state") detail = `sync_state: running=${ev.running} paused=${ev.paused}`;
-  else if (ev.type === "queue_reconciled") detail = `queue_reconciled: +${ev.added || 0} added, ${ev.marked_gone || 0} gone`;
-  else if (ev.type === "dashcam_delete") {
-    if (ev.ok) detail = `dashcam_delete: ${ev.filename} ok`;
-    else if (ev.reason === "size_mismatch"
-             && ev.local_size != null && ev.remote_size != null) {
-      const delta = ev.local_size - ev.remote_size;
-      const sign = delta >= 0 ? "+" : "";
-      detail = `dashcam_delete: ${ev.filename} skipped `
-        + `(size_mismatch: local=${ev.local_size} dashcam=${ev.remote_size}, ${sign}${delta})`;
-    }
-    else detail = `dashcam_delete: ${ev.filename} skipped (${ev.reason || "unknown"})`;
-  }
-  else if (ev.type === "retention_deleted") {
-    detail = `retention_deleted: ${ev.filename} (${ev.reason})`;
-  }
-  else if (ev.type === "snapshot") detail = "snapshot (initial state)";
-  line.innerHTML = `<span class="log-ts">${ts}</span> <span class="log-msg">${detail}</span>`;
-  container.appendChild(line);
-  while (container.children.length > MAX_LOG_ENTRIES) {
-    container.removeChild(container.firstChild);
-  }
-  container.scrollTop = container.scrollHeight;
-}
-
 function handleEvent(ev) {
-  appendLog(ev);
   const statusEl = document.getElementById("sync-status");
   const STATUS_LABEL = {
     downloading: "Downloading",
@@ -2142,6 +2251,9 @@ function handleEvent(ev) {
     case "import_progress":
     case "import_done":
       if (window.__importOnEvent) window.__importOnEvent(ev);
+      break;
+    case "log":
+      logsLive(ev);
       break;
   }
 }

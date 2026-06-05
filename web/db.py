@@ -161,6 +161,17 @@ CREATE TABLE IF NOT EXISTS geocode_cache (
     fetched_at  INTEGER NOT NULL,
     PRIMARY KEY (lat_key, lon_key)
 );
+
+CREATE TABLE IF NOT EXISTS app_log (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts        REAL    NOT NULL,   -- record.created (unix seconds, fractional)
+    levelno   INTEGER NOT NULL,   -- 10/20/30/40/50; "WARNING+" = levelno >= 30
+    level     TEXT    NOT NULL,   -- 'INFO','WARNING','ERROR',...
+    logger    TEXT    NOT NULL,   -- record.name, e.g. 'viofosync.sync_worker'
+    message   TEXT    NOT NULL,   -- record.getMessage()
+    exc_text  TEXT                -- formatted traceback, NULL when none
+);
+CREATE INDEX IF NOT EXISTS idx_app_log_levelno ON app_log(levelno, id DESC);
 """
 
 
