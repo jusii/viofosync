@@ -553,6 +553,9 @@ class SyncWorker:
             protect_ro=snap.retention_protect_ro,
             quota_gb=snap.recordings_quota_gb,
             sink=sink,
+            exclude=_retention.import_exclude_set(
+                snap.recordings, snap.import_path
+            ),
         )
         await self._emit_disk_pct()
 
@@ -704,6 +707,9 @@ class SyncWorker:
                     protect_ro=snap.retention_protect_ro,
                     quota_gb=snap.recordings_quota_gb,
                     sink=sink,
+                    exclude=_retention.import_exclude_set(
+                        snap.recordings, snap.import_path
+                    ),
                 )
             except Exception:  # pragma: no cover — non-fatal
                 log.exception("post-cycle scan/thumb sweep failed")

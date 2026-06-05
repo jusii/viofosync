@@ -2138,6 +2138,11 @@ function handleEvent(ev) {
         refreshExportJobs();
       }
       break;
+    case "import_started":
+    case "import_progress":
+    case "import_done":
+      if (window.__importOnEvent) window.__importOnEvent(ev);
+      break;
   }
 }
 
@@ -2896,4 +2901,219 @@ window.addEventListener("hashchange", () => {
   } catch {
     showLogin();
   }
+})();
+
+// ---- Import modal -------------------------------------------------------
+(function importModal() {
+  const modal = document.getElementById("import-modal");
+  if (!modal) return;
+  const $ = (id) => document.getElementById(id);
+  const show = (el) => el && el.classList.remove("hidden");
+  const hide = (el) => el && el.classList.add("hidden");
+  const csrfH = () => (state.csrf ? { "x-csrf-token": state.csrf } : {});
+
+  $("import-btn").addEventListener("click", () => {
+    hide($("import-summary")); hide($("import-progress"));
+    show(modal);
+  });
+  $("import-close").addEventListener("click", () => hide(modal));
+
+  modal.querySelectorAll(".import-tab").forEach((tab) => {
+    tab.addEventListener("click", () => {
+      modal.querySelectorAll(".import-tab").forEach((t) => t.classList.remove("active"));
+      tab.classList.add("active");
+      modal.querySelectorAll(".tab-pane").forEach((p) => hide(p));
+      show(modal.querySelector(`[data-pane="${tab.dataset.tab}"]`));
+    });
+  });
+
+  const RE = /^\d{4}_\d{4}_\d{6}_\d+.+\.MP4$/i;
+  const tsOf = (n) => {
+    const m = n.match(/^(\d{4})_(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})/);
+    return m ? Number(m.slice(1).join("")) : 0;
+  };
+
+  // --- Upload tab ---
+  // Each entry is { file, path } so the folder picker (relative path via
+  // webkitRelativePath) and drag-dropped folders (path from the
+  // FileSystemEntry walk) share one shape: the path drives RO detection
+  // server-side, the basename drives the write location.
+  let picked = [];
+  const dz = modal.querySelector(".dropzone");
+  const dzTitle = modal.querySelector(".dropzone-title");
+
+  function applySelection(items) {
+    picked = items
+      .filter((it) => RE.test(it.file.name))
+      .sort((a, b) => tsOf(b.file.name) - tsOf(a.file.name)); // newest-first
+    const skipped = items.length - picked.length;
+    dz.classList.toggle("has-files", picked.length > 0);
+    dzTitle.textContent = picked.length
+      ? `${picked.length} clip${picked.length === 1 ? "" : "s"} ready`
+      : "Drag a folder here, or click to browse";
+    $("import-upload-manifest").textContent = items.length
+      ? (picked.length
+          ? `${picked.length} recognised${skipped ? `, ${skipped} skipped` : ""} — newest first.`
+          : "No Viofo clips found in that folder.")
+      : "";
+    $("import-upload-go").disabled = picked.length === 0;
+  }
+
+  $("import-files").addEventListener("change", (e) => {
+    applySelection(
+      [...e.target.files].map((f) => ({ file: f, path: f.webkitRelativePath || f.name })),
+    );
+  });
+
+  // Drag-and-drop a folder onto the dropzone. The browser default is to
+  // navigate to the dropped item, so every handler must preventDefault.
+  const readEntries = (reader) =>
+    new Promise((res, rej) => reader.readEntries(res, rej));
+  async function walk(entry, prefix, out) {
+    const here = prefix ? `${prefix}/${entry.name}` : entry.name;
+    if (entry.isFile) {
+      out.push({ file: await new Promise((res, rej) => entry.file(res, rej)), path: here });
+    } else if (entry.isDirectory) {
+      const reader = entry.createReader();
+      let batch;
+      do {
+        batch = await readEntries(reader);
+        for (const child of batch) await walk(child, here, out);
+      } while (batch.length);
+    }
+  }
+
+  const stop = (e) => { e.preventDefault(); e.stopPropagation(); };
+  ["dragenter", "dragover"].forEach((ev) =>
+    dz.addEventListener(ev, (e) => { stop(e); dz.classList.add("dragging"); }));
+  dz.addEventListener("dragleave", (e) => {
+    if (!dz.contains(e.relatedTarget)) dz.classList.remove("dragging");
+  });
+  dz.addEventListener("drop", async (e) => {
+    stop(e);
+    dz.classList.remove("dragging");
+    const dt = e.dataTransfer;
+    // webkitGetAsEntry must be read synchronously, before any await.
+    const entries = dt.items
+      ? [...dt.items]
+          .filter((i) => i.kind === "file")
+          .map((i) => (i.webkitGetAsEntry ? i.webkitGetAsEntry() : null))
+          .filter(Boolean)
+      : [];
+    const plain = entries.length ? [] : [...dt.files];
+    const out = [];
+    for (const entry of entries) await walk(entry, "", out);
+    for (const f of plain) out.push({ file: f, path: f.name });
+    applySelection(out);
+  });
+
+  // Stop a near-miss drop (onto the card or backdrop) from navigating the
+  // page away while the modal is open; real drops on the zone are handled
+  // above. Only active while the modal is open, so app-wide DnD is untouched.
+  const guardStrayDrop = (e) => { if (!modal.classList.contains("hidden")) e.preventDefault(); };
+  window.addEventListener("dragover", guardStrayDrop);
+  window.addEventListener("drop", guardStrayDrop);
+
+  $("import-upload-go").addEventListener("click", async () => {
+    show($("import-progress")); hide($("import-summary"));
+    const tally = {};
+    for (let i = 0; i < picked.length; i++) {
+      const { file, path } = picked[i];
+      $("import-status").textContent = `Uploading ${file.name} (${i + 1}/${picked.length})`;
+      $("import-bar").style.width = `${(i / picked.length) * 100}%`;
+      let res;
+      try {
+        const r = await fetch("/api/import/upload", {
+          method: "POST",
+          credentials: "same-origin",
+          headers: {
+            ...csrfH(),
+            "X-Import-Path": path,
+            "X-Import-Size": String(file.size),
+            "Content-Type": "application/octet-stream",
+          },
+          body: file,
+        });
+        if (!r.ok) {
+          let detail = r.status;
+          try { detail = (await r.json()).detail || r.status; } catch (_) {}
+          res = { status: "error", detail: String(detail) };
+        } else {
+          res = await r.json();
+        }
+      } catch (err) {
+        res = { status: "error", detail: String(err) };
+      }
+      const key = res.status === "error" ? "errors" : res.status;
+      tally[key] = (tally[key] || 0) + 1;
+    }
+    $("import-bar").style.width = "100%";
+    await fetch("/api/archive/rescan", { method: "POST", credentials: "same-origin", headers: csrfH() });
+    renderSummary(tally);
+  });
+
+  // --- Folder tab ---
+  $("import-folder-scan").addEventListener("click", async () => {
+    const path = $("import-folder-path").value.trim() || null;
+    const r = await fetch("/api/import/scan", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { ...csrfH(), "Content-Type": "application/json" },
+      body: JSON.stringify({ path }),
+    });
+    if (!r.ok) {
+      $("import-folder-manifest").textContent = `Error: ${(await r.json()).detail || r.status}`;
+      hide($("import-folder-go"));
+      return;
+    }
+    const m = await r.json();
+    $("import-folder-manifest").textContent =
+      `${m.recognised.length} clip(s), ${m.skipped.length} skipped, ` +
+      `${(m.total_bytes / 1e9).toFixed(2)} GB${m.cross_volume ? " (external — copy)" : ""}.`;
+    $("import-folder-go").dataset.path = path || "";
+    show($("import-folder-go"));
+  });
+
+  $("import-folder-go").addEventListener("click", async (e) => {
+    const path = e.target.dataset.path || null;
+    show($("import-progress")); hide($("import-summary"));
+    $("import-status").textContent = "Starting…";
+    const r = await fetch("/api/import/ingest", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { ...csrfH(), "Content-Type": "application/json" },
+      body: JSON.stringify({ path }),
+    });
+    if (!r.ok) {
+      hide($("import-progress"));
+      let detail = r.status;
+      try { detail = (await r.json()).detail || r.status; } catch (_) {}
+      $("import-status").textContent = `Error: ${detail}`;
+      show($("import-status"));
+    }
+    // Progress arrives over the WebSocket (import_* events).
+  });
+
+  function renderSummary(t) {
+    hide($("import-progress"));
+    const el = $("import-summary");
+    el.textContent =
+      `Imported ${t.imported || 0}, duplicate ${t.already_present || 0}, ` +
+      `skipped(quota) ${t.over_quota_older || 0}, ` +
+      `unrecognised ${t.not_recognised || 0}, errors ${t.errors || 0}.`;
+    show(el);
+    if (!document.getElementById("view-archive").hidden) loadDays();
+  }
+
+  // Fold folder-mode WS events into the same UI.
+  window.__importOnEvent = (ev) => {
+    if (ev.type === "import_started") {
+      show($("import-progress")); $("import-bar").style.width = "0%";
+    } else if (ev.type === "import_progress") {
+      $("import-bar").style.width = `${(ev.done / Math.max(ev.total, 1)) * 100}%`;
+      $("import-status").textContent = `${ev.filename} (${ev.done}/${ev.total})`;
+    } else if (ev.type === "import_done") {
+      renderSummary(ev);
+    }
+  };
 })();

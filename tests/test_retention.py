@@ -233,7 +233,7 @@ def _patch_quota_scanner(monkeypatch, half_gib: int) -> None:
     ret._size_cache.clear()
     monkeypatch.setattr(
         ret, "_scan_dir_bytes",
-        lambda p: len(list(Path(p).rglob("*.MP4"))) * half_gib,
+        lambda p, exclude=frozenset(): len(list(Path(p).rglob("*.MP4"))) * half_gib,
     )
     orig_del = ret._delete_clip_files
     def del_returning(*a, **kw):

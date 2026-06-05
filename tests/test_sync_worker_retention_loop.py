@@ -42,6 +42,7 @@ def _snap(**over):
         retention_disk_pct=0,
         retention_protect_ro=False,
         recordings_quota_gb=3000,
+        import_path="",
     )
     base.update(over)
     return types.SimpleNamespace(**base)

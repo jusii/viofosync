@@ -32,6 +32,7 @@ from .routers import settings as settings_router
 from .routers import mqtt as mqtt_router
 from .routers import setup as setup_router
 from .routers import storage as storage_router
+from .routers import imports as imports_router
 from .services import retention as _ret_mod
 from .services import scanner
 from .services.exporter import (
@@ -256,6 +257,7 @@ def create_app() -> FastAPI:
     app.include_router(setup_router.router)
     app.include_router(mqtt_router.router)
     app.include_router(storage_router.router)
+    app.include_router(imports_router.router)
 
     # Static SPA — served at / with an explicit index.html fall-through
     # so the SPA's hash-router owns everything that isn't /api/*.

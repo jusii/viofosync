@@ -3,6 +3,16 @@
 ## Unreleased
 
 ### Added
+- Manual import: bring Viofo clips into the archive without Wi-Fi sync,
+  via browser folder upload or a configurable folder/USB drop path
+  (`IMPORT_PATH`). Imported clips get the usual GPX, thumbnails, indexing,
+  RO/parking classification, and retention; quota imports make room as they
+  go without deleting anything newer than what's being imported. External
+  sources (USB/SD) are only ever read, never modified.
+
+## v2.2 — 2026-06-04
+
+### Added
 - Export downloads now use sensible filenames derived from the
   selected clips' date range, camera, and clip count
   (e.g. `2024-03-15_1430-1502_front_4clips.mp4`).
@@ -41,6 +51,15 @@
   the session moving average. To avoid flooding HA it publishes first at
   ~30 s into a session then at most once per minute, and reports `0` when
   idle. Enabled by default.
+- **Retry failed** button in the web UI download manager re-queues every
+  failed download in one click (mirrors the existing HA action button).
+- Live disk usage is shown in Settings → Archive Retention so you can
+  see headroom against the retention and critical thresholds.
+- Quota-bound retention via the new `RECORDINGS_QUOTA_GB` setting: when
+  set, `RETENTION_DISK_PCT` and `DISK_CRITICAL_PCT` are measured against
+  the declared quota instead of the filesystem reported by `statvfs`.
+  Needed when the recordings directory lives inside a quota-bound share
+  (Synology shared folder, ZFS dataset quota, etc.).
 
 ### Changed
 - Unified `sync_status` to four states: `downloading`, `waiting`,
@@ -52,6 +71,22 @@
   update them: `idle` and `stopped` map to `waiting` (or `paused`
   when sync is fully stopped). Connection state is still reflected
   via the existing `binary_sensor.viofosync_dashcam`.
+- Redesigned the export jobs panel: the type is shown as a
+  human-readable badge (Join Front / Join Rear / PiP Fr / PiP Rf),
+  the State and Progress columns are merged into one Status cell with
+  an inline progress bar, and a new Footage column shows the source
+  clips' date range and clip count. Download and delete are now icon
+  buttons. (The ID and Created columns were dropped.)
+- The download list is now grouped by hour.
+
+### Fixed
+- Archive retention caps (max age / max clips) are enforced on a
+  periodic loop rather than only after a download, so they apply even
+  when no new clips are arriving.
+- Join exports could fail with "No such file or directory" when clip
+  paths were stored relative (e.g. a dev box launched with a relative
+  `RECORDINGS`): ffmpeg's concat demuxer resolved them against its temp
+  directory. The concat list now uses absolute paths.
 
 ## v2.1 — 2026-05-16
 

@@ -97,6 +97,7 @@ def sweep(
     protect_ro: bool,
     quota_gb: int = 0,
     sink=None,
+    exclude: frozenset[str] = frozenset(),
     _now: Optional[int] = None,
 ) -> dict:
     """Run the retention pass. Returns a summary dict.
@@ -158,6 +159,7 @@ def sweep(
             quota_gb=quota_gb,
             protect_ro=protect_ro,
             sink=sink,
+            exclude=exclude,
         )
         bytes_freed += freed_2
         protected += protected_2
@@ -184,12 +186,14 @@ _SIZE_CACHE_TTL = 60.0
 # quota mode: deletes subtract from the cached total so the inner
 # bail-out check in _disk_pressure_pass doesn't trigger a fresh tree
 # walk after every file.
-_size_cache: dict[str, tuple[float, int]] = {}
+_size_cache: dict[tuple[str, frozenset[str]], tuple[float, int]] = {}
 
 
-def _scan_dir_bytes(path: str) -> int:
+def _scan_dir_bytes(path: str, exclude: frozenset[str] = frozenset()) -> int:
     """Sum of file sizes in ``path``, recursing without crossing mount
-    points. Used by quota mode in place of ``shutil.disk_usage`` when
+    points. Directories whose absolute path is in ``exclude`` are
+    skipped wholesale — used to keep import staging dirs off the quota
+    books. Used by quota mode in place of ``shutil.disk_usage`` when
     the OS-level free-space figure doesn't reflect the actual quota
     (e.g. Synology shared folder, ZFS dataset, NFS share)."""
     try:
@@ -210,6 +214,8 @@ def _scan_dir_bytes(path: str) -> int:
                     if st.st_dev != root_dev:
                         continue
                     if entry.is_dir(follow_symlinks=False):
+                        if os.path.abspath(entry.path) in exclude:
+                            continue
                         stack.append(entry.path)
                     elif entry.is_file(follow_symlinks=False):
                         total += st.st_size
@@ -218,23 +224,32 @@ def _scan_dir_bytes(path: str) -> int:
     return total
 
 
-def _cached_used_bytes(path: str, *, refresh: bool = False) -> int:
+def _cached_used_bytes(
+    path: str, *, refresh: bool = False, exclude: frozenset[str] = frozenset()
+) -> int:
     now = _time_mod.monotonic()
-    cached = _size_cache.get(path)
+    key = (path, exclude)
+    cached = _size_cache.get(key)
     if not refresh and cached and (now - cached[0]) < _SIZE_CACHE_TTL:
         return cached[1]
-    used = _scan_dir_bytes(path)
-    _size_cache[path] = (now, used)
+    used = _scan_dir_bytes(path, exclude=exclude)
+    _size_cache[key] = (now, used)
     return used
 
 
-def _cache_subtract(path: str, freed: int) -> None:
-    cached = _size_cache.get(path)
+def _cache_subtract(
+    path: str, freed: int, *, exclude: frozenset[str] = frozenset()
+) -> None:
+    key = (path, exclude)
+    cached = _size_cache.get(key)
     if cached is not None and freed > 0:
-        _size_cache[path] = (cached[0], max(0, cached[1] - freed))
+        _size_cache[key] = (cached[0], max(0, cached[1] - freed))
 
 
-def disk_used_pct(recordings: str, quota_gb: int = 0) -> Optional[float]:
+def disk_used_pct(
+    recordings: str, quota_gb: int = 0,
+    exclude: frozenset[str] = frozenset(),
+) -> Optional[float]:
     """Public helper for consumers (MQTT, status APIs) that want the
     same used-% the retention sweep evaluates against.
 
@@ -255,7 +270,7 @@ def disk_used_pct(recordings: str, quota_gb: int = 0) -> Optional[float]:
     a perpetual error.
     """
     if quota_gb > 0:
-        used = _cached_used_bytes(recordings)
+        used = _cached_used_bytes(recordings, exclude=exclude)
         limit = quota_gb * (1 << 30)
         if limit <= 0:
             return None
@@ -290,24 +305,30 @@ def _pct_exceeded(recordings: str, disk_pct: int) -> bool:
     return (du.used / du.total * 100.0) >= disk_pct
 
 
-def _quota_exceeded(recordings: str, quota_gb: int, *, refresh: bool = False) -> bool:
+def _quota_exceeded(
+    recordings: str, quota_gb: int, *, refresh: bool = False,
+    exclude: frozenset[str] = frozenset(),
+) -> bool:
     """Absolute-quota rule. ``quota_gb == 0`` disables it. Reads from
     the cached size-walk (decremented in-place by each delete) so the
     inner sweep loop doesn't pay for a tree walk per file."""
     if quota_gb <= 0:
         return False
-    return _cached_used_bytes(recordings, refresh=refresh) >= quota_gb * (1 << 30)
+    return _cached_used_bytes(
+        recordings, refresh=refresh, exclude=exclude
+    ) >= quota_gb * (1 << 30)
 
 
 def _over_threshold(
-    recordings: str, *, disk_pct: int, quota_gb: int, refresh: bool = False
+    recordings: str, *, disk_pct: int, quota_gb: int, refresh: bool = False,
+    exclude: frozenset[str] = frozenset(),
 ) -> bool:
     """True if EITHER rule is currently breached. Independent triggers
     — set the percentage to bound the underlying filesystem, set the
     quota to bound bytes-under-recordings, or set both."""
     return (
         _pct_exceeded(recordings, disk_pct)
-        or _quota_exceeded(recordings, quota_gb, refresh=refresh)
+        or _quota_exceeded(recordings, quota_gb, refresh=refresh, exclude=exclude)
     )
 
 
@@ -319,6 +340,7 @@ def _disk_pressure_pass(
     quota_gb: int,
     protect_ro: bool,
     sink,
+    exclude: frozenset[str] = frozenset(),
 ) -> tuple[int, int, int]:
     """Delete oldest clips first until both pressure rules are
     satisfied or no more eligible candidates remain.
@@ -348,6 +370,7 @@ def _disk_pressure_pass(
     bytes_freed = 0
     while _over_threshold(
         recordings, disk_pct=disk_pct, quota_gb=quota_gb, refresh=True,
+        exclude=exclude,
     ):
         where = ""
         if protect_ro:
@@ -365,19 +388,21 @@ def _disk_pressure_pass(
             break
         for row in rows:
             freed = _delete_clip_files(row, recordings)
-            _cache_subtract(recordings, freed)
+            _cache_subtract(recordings, freed, exclude=exclude)
             bytes_freed += freed
             _delete_index_row(db, row["id"])
             deleted += 1
             _broadcast(sink, row["basename"], "disk")
             if not _over_threshold(
                 recordings, disk_pct=disk_pct, quota_gb=quota_gb,
+                exclude=exclude,
             ):
                 return deleted, bytes_freed, 0
 
     protected = 0
     if protect_ro and _over_threshold(
         recordings, disk_pct=disk_pct, quota_gb=quota_gb, refresh=True,
+        exclude=exclude,
     ):
         with db.conn() as c:
             protected = c.execute(
@@ -385,3 +410,77 @@ def _disk_pressure_pass(
                 "WHERE COALESCE(event_type, '') = 'ro'"
             ).fetchone()["n"]
     return deleted, bytes_freed, protected
+
+
+def make_room_for(
+    db: Database, recordings: str, *,
+    size: int, before_ts: int,
+    disk_pct: int, quota_gb: int, protect_ro: bool,
+    exclude: frozenset[str] = frozenset(),
+) -> bool:
+    """Ensure ``size`` more bytes will fit under the active rules,
+    by deleting the OLDEST clip whose timestamp < ``before_ts``
+    (skipping ``ro`` when ``protect_ro``). Returns False when no
+    evictable clip older than ``before_ts`` remains while still
+    over threshold — the caller then skips that clip. Never deletes
+    a clip newer than or equal to the one being imported.
+
+    With neither rule set, returns True (rely on the filesystem).
+
+    The quota total is walked ONCE up front and decremented by the
+    bytes each delete frees, so a multi-eviction call does not
+    re-walk the tree per file (matching the size-cache philosophy
+    used elsewhere in this module).
+    """
+    if disk_pct <= 0 and quota_gb <= 0:
+        return True
+
+    quota_bytes = quota_gb * (1 << 30) if quota_gb > 0 else None
+    used = _scan_dir_bytes(recordings, exclude=exclude) if quota_bytes else 0
+
+    def _over() -> bool:
+        if quota_bytes is not None and used + size >= quota_bytes:
+            return True
+        if disk_pct > 0:
+            try:
+                du = shutil.disk_usage(recordings)
+            except OSError:
+                return False
+            if du.total > 0 and ((du.used + size) / du.total * 100.0) >= disk_pct:
+                return True
+        return False
+
+    where = "WHERE timestamp < ?"
+    params: list = [before_ts]
+    if protect_ro:
+        where += " AND COALESCE(event_type, '') != 'ro'"
+
+    while _over():
+        with db.conn() as c:
+            row = c.execute(
+                f"SELECT id, path, basename FROM clip_index {where} "
+                f"ORDER BY timestamp ASC LIMIT 1",
+                params,
+            ).fetchone()
+        if row is None:
+            return False
+        freed = _delete_clip_files(dict(row), recordings)
+        _delete_index_row(db, row["id"])
+        used = max(0, used - freed)
+    return True
+
+
+def import_exclude_set(recordings: str, import_path: str = "") -> frozenset[str]:
+    """Absolute dirs to keep off the quota walk during import: the
+    ``.import_tmp`` staging dir, and the resolved import drop folder
+    when it lives inside the recordings tree (a same-volume external
+    mount is a different st_dev and is never counted anyway)."""
+    rec_abs = os.path.abspath(recordings)
+    out = {os.path.join(rec_abs, ".import_tmp")}
+    resolved = os.path.abspath(import_path or os.path.join(recordings, "import"))
+    try:
+        if resolved != rec_abs and os.path.commonpath([resolved, rec_abs]) == rec_abs:
+            out.add(resolved)
+    except ValueError:  # different drives (Windows) — not under recordings
+        pass
+    return frozenset(out)

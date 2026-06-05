@@ -43,6 +43,7 @@ class Snapshot:
     address: str | None
     address_fallback: str | None
     recordings: str
+    import_path: str
     grouping: str
     use_html_listing: bool
     gps_extract: bool
@@ -226,6 +227,7 @@ class SettingsProvider:
             address=m.ADDRESS,
             address_fallback=m.ADDRESS_FALLBACK,
             recordings=self._recordings,
+            import_path=m.IMPORT_PATH,
             grouping=m.GROUPING,
             use_html_listing=m.HTML,
             gps_extract=m.GPS_EXTRACT,

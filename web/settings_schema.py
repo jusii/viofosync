@@ -29,6 +29,7 @@ class SettingsModel(BaseModel):
 
     ADDRESS: str | None = None
     ADDRESS_FALLBACK: str | None = None
+    IMPORT_PATH: str = ""
     WEB_PASSWORD_HASH: str = ""
     SESSION_SECRET: str = Field(default_factory=lambda: secrets.token_hex(32))
 
@@ -80,6 +81,11 @@ class SettingsModel(BaseModel):
     MQTT_NODE_ID: str = "viofosync"
     MQTT_DISCOVERY_ENABLED: bool = True
     MQTT_QOS: Literal[0, 1, 2] = 1
+
+    @field_validator("IMPORT_PATH")
+    @classmethod
+    def _validate_import_path(cls, v: str) -> str:
+        return v.strip()
 
     @field_validator("ADDRESS", "ADDRESS_FALLBACK")
     @classmethod
@@ -149,7 +155,7 @@ class SettingsModel(BaseModel):
 
 # Public taxonomy used by the API + UI.
 EDITABLE_KEYS = {
-    "ADDRESS", "ADDRESS_FALLBACK", "GROUPING", "HTML", "GPS_EXTRACT",
+    "ADDRESS", "ADDRESS_FALLBACK", "IMPORT_PATH", "GROUPING", "HTML", "GPS_EXTRACT",
     "DELETE_AFTER_DOWNLOAD",
     "TIMEOUT", "DOWNLOAD_ATTEMPTS", "MAX_DOWNLOAD_ATTEMPTS", "SYNC_INTERVAL",
     "ENABLE_SCHEDULED_SYNC", "WEB_HOST", "WEB_PORT", "EXPORT_ENCODER",

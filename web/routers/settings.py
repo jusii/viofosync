@@ -33,6 +33,7 @@ def _editable_values(snap) -> dict[str, Any]:
     return {
         "ADDRESS": snap.address or "",
         "ADDRESS_FALLBACK": snap.address_fallback or "",
+        "IMPORT_PATH": snap.import_path,
         "GROUPING": snap.grouping,
         "HTML": snap.use_html_listing,
         "GPS_EXTRACT": snap.gps_extract,

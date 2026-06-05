@@ -228,3 +228,16 @@ def test_snapshot_exposes_disk_critical_pct():
                                env_file_path=f"{d}/v.env",
                                recordings_dir=d)
         assert sp.get().disk_critical_pct == 95
+
+
+def test_import_path_round_trips_and_defaults_empty():
+    from web.settings_schema import (
+        DEFAULT_VALUES, EDITABLE_KEYS, validate_partial,
+    )
+    # Editable + defaults to empty (meaning "<recordings>/import").
+    assert "IMPORT_PATH" in EDITABLE_KEYS
+    assert DEFAULT_VALUES["IMPORT_PATH"] == ""
+    # Round-trips through validate_partial, stripping whitespace.
+    out = validate_partial({"IMPORT_PATH": "  /mnt/usb  "})
+    assert out["IMPORT_PATH"] == "/mnt/usb"
+    assert validate_partial({"IMPORT_PATH": "  "})["IMPORT_PATH"] == ""

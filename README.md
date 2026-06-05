@@ -11,7 +11,7 @@ Self-hosted web app for syncing, browsing, and exporting recordings from a Viofo
 - **Archive browser** — clips grouped by day, paired front/rear, in-browser playback.
 - **GPS journeys** — map per trip with auto-split stops and reverse-geocoded place names.
 - **Exports** — joined front/rear or picture-in-picture (front-main or rear-main) videos via ffmpeg, with download names derived from the clip date range and camera. Or grab the **original** front/rear clips directly, un-joined.
-- **Download manager** — live progress and a reorderable queue.
+- **Download manager** — live progress with session speed and ETA, a reorderable queue, hourly grouping, and one-click retry of failed downloads.
 - **Auto-delete from dashcam** *(optional)* — frees SD card space once a clip is safely downloaded.
 - **Settings page** — runtime settings hot-reload; no Docker env vars to fiddle with.
 - **Home Assistant** *(optional)* — auto-discovered sensors and buttons via MQTT.
@@ -57,6 +57,37 @@ The only Docker-level env vars are:
 
 
 App-level settings (sync interval, dashcam IP, encoder, geocoding email, web port, retention, password, auto-delete, etc.) are editable on the **Settings** page. Advanced users can hand-edit `/config/config.json` between restarts; the schema lives in `[web/settings_schema.py](web/settings_schema.py)`.
+
+### Importing without Wi-Fi
+
+Use **Import manually** in the web UI to ingest clips you already have on
+disk — no dashcam connection needed. Two modes:
+
+- **Upload** — pick a folder in your browser; clips upload one at a time
+  and slot straight into the archive. On a quota-bound archive it makes
+  room as it goes, evicting the oldest clips (never anything newer than
+  what you're importing).
+- **Folder** — copy clips into the `import` folder inside your recordings
+  share, then **Scan** → **Ingest**. By default this is `recordings/import`;
+  for a one-off import from a different path, type it in the Import dialog's
+  Folder tab, or set a persistent default via the advanced `IMPORT_PATH` key
+  in `/config/config.json`.
+
+**From a USB drive / card reader:** bind-mount it into the container and set
+the import path to the mount, e.g.:
+
+    docker run ... -v /mnt/usb:/import robxyz/viofosync
+    # then type /import in the Import dialog, or set IMPORT_PATH=/import in /config/config.json
+
+The source is only ever **read** — originals on the card/USB are never
+deleted. If you plug the drive in *after* the container starts, either
+restart the container or use shared mount propagation
+(`-v /mnt:/mnt:rshared`, with the host mount also shared) so the container
+sees it.
+
+Imported clips are recognised by Viofo naming
+(`YYYY_MMDD_HHMMSS_NNNN[event][cam].MP4`); locked clips under an `RO/`
+folder keep their protected status. Non-matching files are left untouched.
 
 ## Alternative camera address
 
@@ -105,7 +136,7 @@ When MQTT is on, viofosync publishes:
 Enabled by default in HA: dashcam connectivity, dashcam connection
 (`primary` / `alternative` / `offline`, with the live address as an
 `address` attribute), sync status
-(`stopped` / `idle` / `paused` / `downloading`), queue pending, last
+(`downloading` / `waiting` / `paused` / `error`), queue pending, last
 downloaded clip, disk used, and six action buttons
 (start/pause/skip/refresh/retry-failed/rescan).
 

@@ -1698,3 +1698,163 @@ main {
 .storage-usage-mode {
   margin: 0.5rem 0 0;
 }
+
+/* ---- Import recordings modal ---- */
+#import-modal {
+  position: fixed; inset: 0; z-index: 1500;
+  display: flex; align-items: center; justify-content: center; padding: 24px;
+  background: oklch(0.10 0.008 250 / 0.62);
+  -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px);
+  animation: import-fade 160ms ease;
+}
+#import-modal.hidden { display: none; }
+@keyframes import-fade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes import-rise {
+  from { opacity: 0; transform: translateY(10px) scale(0.985); }
+  to   { opacity: 1; transform: none; }
+}
+
+#import-modal .modal-card {
+  width: min(520px, 100%); max-height: 88vh; overflow: auto;
+  background: var(--panel); color: var(--text);
+  border: 1px solid var(--border); border-radius: 14px;
+  box-shadow: 0 24px 60px oklch(0 0 0 / 0.55);
+  padding: 22px 24px 24px;
+  animation: import-rise 220ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+#import-modal .modal-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding-bottom: 14px; margin-bottom: 16px;
+  border-bottom: 1px solid var(--border);
+}
+#import-modal .modal-head h2 {
+  margin: 0; font-size: 1.15rem; letter-spacing: -0.01em;
+}
+#import-modal .modal-x {
+  display: flex; align-items: center; justify-content: center;
+  width: 32px; height: 32px; padding: 0; flex-shrink: 0;
+  border: 0; border-radius: 8px; background: transparent; color: var(--muted);
+  transition: background 140ms ease, color 140ms ease;
+}
+#import-modal .modal-x:hover { background: var(--panel-3); color: var(--text); }
+
+/* Tabs — underline, muted until active */
+#import-modal .tabs {
+  display: flex; gap: 4px; margin: 0 0 18px; border-bottom: 1px solid var(--border);
+}
+#import-modal .import-tab {
+  padding: 8px 14px; margin-bottom: -1px;
+  border: 0; background: transparent; cursor: pointer;
+  color: var(--muted); font-size: 0.92rem; font-weight: 500;
+  border-bottom: 2px solid transparent;
+  transition: color 140ms ease, border-color 140ms ease;
+}
+#import-modal .import-tab:hover { color: var(--text); }
+#import-modal .import-tab.active { color: var(--text); border-bottom-color: var(--accent); }
+
+#import-modal .tab-pane.hidden { display: none; }
+#import-modal .pane-lead {
+  margin: 0 0 14px; color: var(--muted); font-size: 0.9rem; line-height: 1.5;
+}
+#import-modal code {
+  font-family: "SF Mono", "Menlo", monospace; font-size: 0.85em;
+  background: var(--panel-2); border: 1px solid var(--border);
+  border-radius: 4px; padding: 1px 5px;
+}
+
+/* Upload dropzone (native input visually hidden, label is the target) */
+#import-modal #import-files {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+#import-modal .dropzone {
+  display: flex; flex-direction: column; align-items: center; gap: 8px;
+  text-align: center; padding: 30px 20px;
+  border: 1.5px dashed var(--border-hover); border-radius: 12px;
+  background: var(--panel-2); cursor: pointer;
+  transition: border-color 160ms ease, background 160ms ease;
+}
+#import-modal .dropzone:hover { border-color: var(--accent); background: var(--accent-08); }
+#import-modal #import-files:focus-visible + .dropzone {
+  border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-35);
+}
+#import-modal .dropzone.has-files {
+  border-style: solid; border-color: var(--accent); background: var(--accent-08);
+}
+#import-modal .dropzone.dragging {
+  border-style: solid; border-color: var(--accent); background: var(--accent-18);
+}
+#import-modal .dropzone-icon { color: var(--accent); }
+#import-modal .dropzone-title { font-weight: 600; font-size: 0.98rem; }
+#import-modal .dropzone-hint { color: var(--muted); font-size: 0.82rem; line-height: 1.45; }
+
+/* Folder path row */
+#import-modal .field-row { display: flex; gap: 8px; align-items: stretch; }
+#import-modal .field-row input { flex: 1; }
+#import-modal #import-folder-path {
+  font-family: "SF Mono", "Menlo", monospace; font-size: 0.85rem;
+}
+
+/* Manifest line */
+#import-modal .manifest {
+  margin: 14px 0 0; font-size: 0.88rem; color: var(--muted);
+  max-height: 30vh; overflow: auto;
+}
+#import-modal .manifest:empty { margin: 0; }
+/* Breathing room above the pane's action button, regardless of whether
+   the manifest line is populated (it collapses when empty). */
+#import-modal .tab-pane > .btn { margin-top: 20px; }
+
+/* Buttons (scoped to the modal) */
+#import-modal .btn {
+  padding: 9px 16px; border-radius: 8px;
+  border: 1px solid var(--border); background: var(--panel-2); color: var(--text);
+  font-weight: 500; font-size: 0.92rem; cursor: pointer;
+  transition: background 140ms ease, border-color 140ms ease, filter 140ms ease;
+}
+#import-modal .btn:hover { background: var(--panel-3); border-color: var(--border-hover); }
+#import-modal .btn.primary {
+  background: var(--accent); border-color: var(--accent); color: var(--on-accent);
+  font-weight: 600;
+}
+#import-modal .btn.primary:hover { filter: brightness(1.07); }
+#import-modal .btn:disabled { opacity: 0.45; cursor: not-allowed; filter: none; }
+#import-modal .btn.hidden { display: none; }
+
+/* Progress */
+#import-modal .progress { margin-top: 18px; }
+#import-modal .progress.hidden { display: none; }
+#import-modal .progress .bar {
+  height: 8px; background: var(--panel-2); border: 1px solid var(--border);
+  border-radius: 999px; overflow: hidden;
+}
+#import-modal .progress .bar span {
+  display: block; height: 100%; width: 0; border-radius: 999px;
+  background: linear-gradient(90deg, var(--accent-85), var(--accent));
+  transition: width 220ms ease;
+}
+#import-modal #import-status {
+  margin: 10px 0 0; font-size: 0.85rem; color: var(--muted);
+  font-family: "SF Mono", "Menlo", monospace;
+}
+
+/* Summary card */
+#import-modal .summary {
+  margin-top: 18px; padding: 14px 16px;
+  background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px;
+  font-size: 0.9rem; line-height: 1.6; color: var(--text);
+}
+#import-modal .summary.hidden { display: none; }
+
+/* "Import recordings" launcher in the Download-manager header */
+.import-launch {
+  margin-left: auto; align-self: center;
+  display: inline-flex; align-items: center; gap: 7px;
+  padding: 7px 14px; border-radius: 8px;
+  background: var(--accent-08); border: 1px solid var(--accent-35); color: var(--accent);
+  font-weight: 600; font-size: 0.9rem; cursor: pointer;
+  transition: background 140ms ease, border-color 140ms ease;
+}
+.import-launch:hover { background: var(--accent-18); border-color: var(--accent); }
+.import-launch svg { flex-shrink: 0; }

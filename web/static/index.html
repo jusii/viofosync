@@ -133,6 +133,16 @@
       <section id="view-downloads" class="tab" hidden>
         <div class="view-header">
           <h2>Download manager</h2>
+          <button id="import-btn" type="button" class="import-launch">
+            <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" fill="none"
+                 stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                 stroke-linejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+              <polyline points="7 10 12 15 17 10"/>
+              <line x1="12" y1="15" x2="12" y2="3"/>
+            </svg>
+            Manual import
+          </button>
         </div>
         <div id="session-stats" class="session-stats" hidden></div>
         <div id="current-download" class="current"></div>
@@ -205,6 +215,63 @@
             <input type="checkbox" id="modal-autoplay" /> Auto-advance
           </label>
         </div>
+      </div>
+    </div>
+
+    <div id="import-modal" class="modal hidden" role="dialog" aria-modal="true"
+         aria-labelledby="import-title">
+      <div class="modal-card">
+        <header class="modal-head">
+          <h2 id="import-title">Import recordings</h2>
+          <button id="import-close" class="modal-x" aria-label="Close">
+            <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none"
+                 stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                 stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+          </button>
+        </header>
+
+        <nav class="tabs" role="tablist">
+          <button class="import-tab active" data-tab="upload" role="tab">Upload</button>
+          <button class="import-tab" data-tab="folder" role="tab">Folder</button>
+        </nav>
+
+        <section class="tab-pane" data-pane="upload">
+          <input id="import-files" type="file" webkitdirectory multiple />
+          <label class="dropzone" for="import-files">
+            <svg class="dropzone-icon" viewBox="0 0 24 24" width="30" height="30"
+                 aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6"
+                 stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+              <polyline points="17 8 12 3 7 8"/>
+              <line x1="12" y1="3" x2="12" y2="15"/>
+            </svg>
+            <span class="dropzone-title">Drag a folder here, or click to browse</span>
+            <span class="dropzone-hint">Front &amp; rear <code>.MP4</code> files are
+              recognised automatically</span>
+          </label>
+          <div id="import-upload-manifest" class="manifest"></div>
+          <button id="import-upload-go" class="btn primary" disabled>Import</button>
+        </section>
+
+        <section class="tab-pane hidden" data-pane="folder">
+          <p class="pane-lead">
+            Copy clips into the <code>import</code> folder in your recordings share,
+            or point at a path / mounted USB drive.
+          </p>
+          <div class="field-row">
+            <input id="import-folder-path" type="text"
+                   placeholder="recordings/import (default)" />
+            <button id="import-folder-scan" class="btn">Scan</button>
+          </div>
+          <div id="import-folder-manifest" class="manifest"></div>
+          <button id="import-folder-go" class="btn primary hidden">Ingest</button>
+        </section>
+
+        <div id="import-progress" class="progress hidden">
+          <div class="bar"><span id="import-bar"></span></div>
+          <p id="import-status"></p>
+        </div>
+        <div id="import-summary" class="summary hidden"></div>
       </div>
     </div>
   </div>
