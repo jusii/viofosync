@@ -145,6 +145,9 @@ input[type="radio"] {
 }
 .icon-btn:hover { background: var(--panel-3); }
 .icon-btn.active { color: var(--ok); border-color: var(--ok); }
+/* Waiting: match the sync-status badge's amber so the button and badge
+ * read as the same state. */
+.icon-btn.waiting { color: var(--warn); border-color: var(--warn); }
 /* When the syncing icon is the visible one, give it a gentle
  * continuous spin so the button reads as "in progress". */
 .icon-btn.active #sync-icon-sync:not([hidden]) {
@@ -213,13 +216,21 @@ input[type="radio"] {
 #login-form button:hover { filter: brightness(1.06); background: var(--accent); }
 
 /* App chrome */
+/* The bar itself is full-bleed: background + border span the viewport. */
 #app header {
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+}
+/* The content inside is constrained to the same 1400px column as <main>
+ * and centred, so the brand / nav / actions line up with the page body
+ * on wide screens instead of hugging the viewport edge. */
+#app header .header-inner {
   display: flex;
   align-items: center;
   gap: 16px;
+  max-width: 1400px;
+  margin: 0 auto;
   padding: 12px 24px;
-  background: var(--panel);
-  border-bottom: 1px solid var(--border);
 }
 #app header h1 { margin: 0; font-size: 18px; }
 nav a {
@@ -267,7 +278,7 @@ nav a.active { background: var(--panel-2); }
  * dark/light themes stay coherent — extend the palette only if a
  * future revision adds new accent tokens. */
 .status.downloading { color: var(--ok); border-color: var(--ok); }
-.status.waiting     { color: #f59e0b; border-color: #f59e0b; }
+.status.waiting     { color: var(--warn); border-color: var(--warn); }
 .status.paused      { color: var(--err-text); border-color: var(--err); }
 .status.error {
   color: #ffffff;
@@ -1330,6 +1341,8 @@ main {
 /* === <= 1024px : small laptops, tablet landscape === */
 @media (max-width: 1024px) {
   main { padding: 20px 16px; }
+  /* Keep the header content inset matching main's reduced padding. */
+  #app header .header-inner { padding-left: 16px; padding-right: 16px; }
   .journey-map { height: 420px; }
   #map { height: 280px; }
 }
@@ -1341,14 +1354,14 @@ main {
   /* Header reorders: brand + actions on row 1, nav on its own row.
    * The spacer (which was eating 1900px on desktop) is dropped, and
    * nav links stretch so the two tabs are equal-weight thumb targets. */
-  #app header {
+  #app header .header-inner {
     flex-wrap: wrap;
     gap: 8px 10px;
     padding: 10px 14px;
     padding-left: max(14px, env(safe-area-inset-left));
     padding-right: max(14px, env(safe-area-inset-right));
   }
-  #app header > .spacer { display: none; }
+  #app header .header-inner > .spacer { display: none; }
   #app header h1 { flex: 0 1 auto; margin-right: auto; }
   #app header nav {
     order: 10;
@@ -1534,7 +1547,7 @@ main {
 @media (max-width: 480px) {
   main { padding: 12px 10px; }
 
-  #app header { padding: 8px 10px; }
+  #app header .header-inner { padding: 8px 10px; }
   #app header h1 { font-size: 16px; }
 
   /* The "Dashcam offline / online" pill drops its label and
@@ -1550,7 +1563,7 @@ main {
     border: none;
   }
   .status.downloading { background: var(--ok); }
-  .status.waiting     { background: #f59e0b; }
+  .status.waiting     { background: var(--warn); }
   .status.paused      { background: var(--err); }
   .status.error       { background: #7f1d1d; }
 
@@ -1661,10 +1674,10 @@ main {
 #mqtt-panel .pw-wrap input { flex: 1; }
 #mqtt-status { display: flex; align-items: center; gap: .5rem; margin: .8rem 0; }
 #mqtt-status .dot { width: .7rem; height: .7rem; border-radius: 50%; display: inline-block; flex-shrink: 0; }
-#mqtt-status .dot.green  { background: #19a974; }
-#mqtt-status .dot.amber  { background: #ffb700; }
-#mqtt-status .dot.red    { background: #d33; }
-#mqtt-status .dot.grey   { background: #999; }
+#mqtt-status .dot.green  { background: var(--ok); }
+#mqtt-status .dot.amber  { background: var(--warn); }
+#mqtt-status .dot.red    { background: var(--err); }
+#mqtt-status .dot.grey   { background: var(--muted); }
 .mqtt-actions { display: flex; gap: .5rem; flex-wrap: wrap; margin-top: .5rem; }
 .mqtt-actions .primary {
   background: var(--accent);
@@ -1679,8 +1692,8 @@ main {
 .storage-usage {
   margin: 0.5rem 0 1.25rem;
   padding: 0.75rem 0.9rem;
-  background: var(--bg-elev, rgba(0,0,0,0.04));
-  border: 1px solid var(--border, rgba(0,0,0,0.1));
+  background: var(--bg);
+  border: 1px solid var(--border);
   border-radius: 6px;
 }
 .storage-usage-row {
@@ -1697,29 +1710,29 @@ main {
 .storage-usage-value {
   font-variant-numeric: tabular-nums;
   font-size: 0.9rem;
-  color: var(--muted, #666);
+  color: var(--muted);
 }
 .storage-usage-bar {
   position: relative;
   height: 8px;
-  background: var(--bar-track, rgba(0,0,0,0.08));
+  background: var(--panel-3);
   border-radius: 4px;
   overflow: hidden;
 }
 .storage-usage-fill {
   height: 100%;
-  background: var(--accent, #19a974);
+  background: var(--accent);
   transition: width 0.4s ease, background 0.3s ease;
 }
 .storage-usage-fill.over-threshold {
-  background: #d33;
+  background: var(--err);
 }
 .storage-usage-threshold {
   position: absolute;
   top: -2px;
   bottom: -2px;
   width: 2px;
-  background: rgba(0,0,0,0.55);
+  background: var(--warn);
   pointer-events: auto;
 }
 .storage-usage-mode {

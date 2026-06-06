@@ -2789,7 +2789,7 @@ function renderSecuritySection(pane) {
   pane.innerHTML = `
     <h3>Change password</h3>
     <div class="form-row"><label>Current password</label><input type="password" id="pw-current" autocomplete="current-password" /></div>
-    <div class="form-row"><label>New password (min 8)</label><input type="password" id="pw-new" autocomplete="new-password" /></div>
+    <div class="form-row"><label>New password (min 8 characters)</label><input type="password" id="pw-new" autocomplete="new-password" /></div>
     <div class="form-row"><label>Confirm new password</label><input type="password" id="pw-confirm" autocomplete="new-password" /></div>
     <div class="form-row"><label><input type="checkbox" id="pw-logout-others" /> Log out other sessions</label></div>
     <button type="button" id="pw-save">Change password</button>
@@ -3211,7 +3211,7 @@ window.addEventListener("hashchange", () => {
     const el = $("import-summary");
     el.textContent =
       `Imported ${t.imported || 0}, duplicate ${t.already_present || 0}, ` +
-      `skipped(quota) ${t.over_quota_older || 0}, ` +
+      `skipped (over quota) ${t.over_quota_older || 0}, ` +
       `unrecognised ${t.not_recognised || 0}, errors ${t.errors || 0}.`;
     show(el);
     if (!document.getElementById("view-archive").hidden) loadDays();
