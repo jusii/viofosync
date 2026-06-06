@@ -83,6 +83,7 @@ def prioritize_recent(body: PrioritizeRecent, request: Request) -> dict:
     n = q.prioritize_recent_hours(
         request.app.state.db, body.hours
     )
+    q.emit_queue_changed(request.app.state.db, request.app.state.hub)
     worker = getattr(request.app.state, "sync_worker", None)
     if worker is not None:
         worker.kick()
@@ -99,6 +100,7 @@ def prioritize(body: Prioritize, request: Request) -> dict:
     n = q.prioritize(
         request.app.state.db, body.filenames, body.position
     )
+    q.emit_queue_changed(request.app.state.db, request.app.state.hub)
     # Kick the worker so a reorder takes effect right away.
     worker = getattr(request.app.state, "sync_worker", None)
     if worker is not None:
@@ -107,12 +109,17 @@ def prioritize(body: Prioritize, request: Request) -> dict:
 
 
 class Retry(BaseModel):
-    filenames: List[str]
+    # Omit/empty to retry every failed file; otherwise retry just these.
+    filenames: List[str] = Field(default_factory=list)
 
 
 @router.post("/queue/retry", dependencies=[Depends(require_csrf)])
 def retry(body: Retry, request: Request) -> dict:
-    n = q.retry(request.app.state.db, body.filenames)
+    if body.filenames:
+        n = q.retry(request.app.state.db, body.filenames)
+    else:
+        n = q.retry_failed(request.app.state.db)
+    q.emit_queue_changed(request.app.state.db, request.app.state.hub)
     worker = getattr(request.app.state, "sync_worker", None)
     if worker is not None:
         worker.kick()

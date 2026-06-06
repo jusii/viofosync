@@ -36,12 +36,19 @@ import viofosync_lib as vfs
 from ..db import Database
 from ..settings import SettingsProvider
 from . import queue as q
+from . import retention as _retention
 from . import scanner
 from .hub import Hub
 
 log = logging.getLogger("viofosync.sync_worker")
 
 BACKOFF_STEPS = [10, 30, 120, 600]  # seconds
+
+# How often the standalone retention loop enforces the archive caps,
+# independent of whether anything was downloaded. The download cycle
+# still sweeps immediately after a drain; this loop is what keeps the
+# archive bounded when the camera is offline or has nothing new.
+RETENTION_INTERVAL_SECONDS = 300  # 5 minutes
 
 
 def _filter_ro_only(listing):
@@ -270,6 +277,7 @@ class SyncWorker:
         self._provider = provider
         self.hub = hub
         self._task: Optional[asyncio.Task] = None
+        self._retention_task: Optional[asyncio.Task] = None
         self._stop = asyncio.Event()
         self._cancel_current = threading.Event()
         self._kick = asyncio.Event()
@@ -278,6 +286,17 @@ class SyncWorker:
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._running_cycle = False
         self._current_filename: Optional[str] = None
+        # The address chosen for the in-flight cycle (primary or the
+        # alternative). Selected once per cycle and held for the whole
+        # drain — no mid-download switching. None when offline.
+        self._active_address: Optional[str] = None
+        # Tracks the kind of sync_error currently sticky on the hub, so
+        # we can emit clear signals only when a previously-set error
+        # actually changes.
+        self._last_error_kind: Optional[str] = None
+        # Last-known dashcam reachability, so online/offline is logged
+        # on transition rather than every cycle. None = unknown.
+        self._online: Optional[bool] = None
 
     # ---- lifecycle ----
 
@@ -299,10 +318,17 @@ class SyncWorker:
                     "call bind_loop() during app startup"
                 )
         self._stop.clear()
+        log.info("sync worker started")
         # Schedule the coroutine onto the captured loop — works
         # both from the loop thread and from threadpool handlers.
         self._task = asyncio.run_coroutine_threadsafe(
             self._run(), self._loop
+        )
+        # Retention runs on its own cadence, decoupled from the
+        # download cycle: a parked/offline camera or an empty queue
+        # must not stop the archive caps from being enforced.
+        self._retention_task = asyncio.run_coroutine_threadsafe(
+            self._retention_loop(), self._loop
         )
 
     def _is_running(self) -> bool:
@@ -313,21 +339,24 @@ class SyncWorker:
         return not self._task.done()
 
     async def stop(self) -> None:
+        log.info("sync worker stopped")
         self._stop.set()
         self._cancel_current.set()
         self._kick.set()
-        if self._task is not None:
-            # self._task may be an asyncio.Task or a
+        import concurrent.futures
+        for task in (self._task, self._retention_task):
+            if task is None:
+                continue
+            # ``task`` may be an asyncio.Task or a
             # concurrent.futures.Future — wrap uniformly.
-            import concurrent.futures
             try:
-                if isinstance(self._task, concurrent.futures.Future):
-                    await asyncio.wrap_future(self._task)
+                if isinstance(task, concurrent.futures.Future):
+                    await asyncio.wrap_future(task)
                 else:
-                    await asyncio.wait_for(self._task, timeout=10.0)
+                    await asyncio.wait_for(task, timeout=10.0)
             except (asyncio.TimeoutError, Exception):
                 try:
-                    self._task.cancel()
+                    task.cancel()
                 except Exception:
                     pass
 
@@ -346,22 +375,26 @@ class SyncWorker:
         """Abort the in-flight download ASAP. Used when the
         reachability probe fails mid-download or the user
         presses Stop."""
+        log.info("aborting current download")
         self._cancel_current.set()
 
     def skip_current(self) -> None:
         """Cancel the in-flight download and move on to the
         next queue item. Unlike pause, the worker keeps running."""
+        log.info("skipping current download")
         self._cancel_current.set()
 
     def pause(self) -> None:
         """Pause the worker: finish the current chunk then stop
         picking new items. The current download is cancelled."""
+        log.info("sync paused")
         self._paused.set()
         self._cancel_current.set()
         self._broadcast_sync_state()
 
     def resume(self) -> None:
         """Unpause and kick the worker to pick up immediately."""
+        log.info("sync resumed")
         self._paused.clear()
         self._broadcast_sync_state()
         self.kick()
@@ -392,6 +425,71 @@ class SyncWorker:
                         "current_filename": self._current_filename,
                     })
                 )
+            )
+
+    async def _emit_disk_pct(self) -> None:
+        """Broadcast the current filesystem disk usage % so the Hub
+        can evaluate the critical-disk error condition. Called from
+        ``_cycle`` on the event loop.
+
+        Uses :func:`retention.filesystem_used_pct` — NOT the
+        quota-aware ``disk_used_pct``. When ``RECORDINGS_QUOTA_GB``
+        is set, quota retention deliberately keeps the recordings dir
+        at ~100% of quota, so the quota-aware metric would trip
+        ``DISK_CRITICAL_PCT`` perpetually. The critical-disk error
+        is reserved for the filesystem-level "OS will deny writes
+        soon" condition, which is independent of our self-imposed
+        quota.
+        """
+        snap = self._provider.get()
+        pct = _retention.filesystem_used_pct(snap.recordings)
+        if pct is None:
+            return
+        await self.hub.broadcast({"type": "disk_pct", "pct": float(pct)})
+
+    async def _emit_sync_error(
+        self, kind: Optional[str], message: Optional[str]
+    ) -> None:
+        await self.hub.broadcast({
+            "type": "sync_error", "kind": kind, "message": message,
+        })
+
+    async def _set_sync_error(self, kind: str, message: str) -> None:
+        if self._last_error_kind == kind:
+            return  # already sticky on the hub; no event
+        self._last_error_kind = kind
+        await self._emit_sync_error(kind, message)
+
+    async def _clear_sync_error(self) -> None:
+        if self._last_error_kind is None:
+            return
+        self._last_error_kind = None
+        await self._emit_sync_error(None, None)
+
+    async def _check_recordings_writable(self) -> bool:
+        """Return True if the recordings root exists and is writable.
+        Emits a sticky sync_error on failure, clears one on recovery."""
+        snap = self._provider.get()
+        path = getattr(snap, "recordings", None) or ""
+        ok = bool(path) and os.path.isdir(path) and os.access(path, os.W_OK)
+        if not ok:
+            await self._set_sync_error(
+                "recordings_unwritable",
+                "recordings path not writable",
+            )
+            return False
+        if self._last_error_kind == "recordings_unwritable":
+            await self._clear_sync_error()
+        return True
+
+    async def _classify_listing_failure(self, exc: BaseException) -> None:
+        """Inspect a listing exception. If it's HTTP 401/403, emit a
+        sticky auth_failure error. Other exceptions are not promoted to
+        sticky errors — they're transient by nature."""
+        if isinstance(exc, urllib.error.HTTPError) and exc.code in (401, 403):
+            await self._set_sync_error(
+                "auth_failure",
+                "camera authentication failed",
             )
 
     # ---- main loop ----
@@ -426,26 +524,78 @@ class SyncWorker:
                 pass
             self._kick.clear()
 
+    async def _retention_loop(self) -> None:
+        """Enforce the archive caps on a fixed cadence, independent of
+        download activity and camera reachability.
+
+        The download cycle's own post-drain sweep handles clips that
+        just arrived; this loop is what keeps the archive under quota
+        when the camera is offline or has nothing new to download —
+        the cases where ``_cycle`` returns before reaching its sweep.
+        Runs only while the worker is running, so retention follows
+        the same lifecycle as scheduled sync.
+        """
+        while not self._stop.is_set():
+            try:
+                await self._run_retention_sweep()
+            except Exception:  # pragma: no cover — never kill the loop
+                log.exception("periodic retention sweep failed")
+            # Sleep until the next pass, waking immediately on stop.
+            try:
+                await asyncio.wait_for(
+                    self._stop.wait(), timeout=RETENTION_INTERVAL_SECONDS
+                )
+            except asyncio.TimeoutError:
+                pass
+
+    async def _run_retention_sweep(self) -> None:
+        """Run one retention pass against the live settings, then
+        refresh the broadcast disk %. Offloaded to a thread because
+        the sweep walks the archive and touches the DB."""
+        snap = self._provider.get()
+        sink = WebSink(self.hub, asyncio.get_running_loop())
+        await asyncio.to_thread(
+            _retention.sweep,
+            self.db, snap.recordings,
+            max_days=snap.retention_max_days,
+            disk_pct=snap.retention_disk_pct,
+            protect_ro=snap.retention_protect_ro,
+            quota_gb=snap.recordings_quota_gb,
+            sink=sink,
+            exclude=_retention.import_exclude_set(
+                snap.recordings, snap.import_path
+            ),
+        )
+        await self._emit_disk_pct()
+
     # ---- probe ----
 
-    async def _probe(self) -> bool:
-        """3-second TCP probe to the dashcam. True = reachable."""
-        snap = self._provider.get()
-        if not snap.address:
-            return False
+    async def _probe_one(self, address: str) -> bool:
+        """3-second TCP probe to one address on port 80. True = reachable."""
         loop = asyncio.get_running_loop()
-        address = snap.address
 
         def _sync():
             try:
-                with socket.create_connection(
-                    (address, 80), timeout=3.0
-                ):
+                with socket.create_connection((address, 80), timeout=3.0):
                     return True
             except OSError:
                 return False
 
         return await loop.run_in_executor(None, _sync)
+
+    async def _select_active_address(self) -> tuple[Optional[str], str]:
+        """Pick the address for this cycle: primary first, then the
+        alternative. Returns ``(address, source)`` with source one of
+        ``"primary"``, ``"alternative"``, or ``"offline"`` (address None).
+        """
+        snap = self._provider.get()
+        for source, address in (
+            ("primary", snap.address),
+            ("alternative", snap.address_fallback),
+        ):
+            if address and await self._probe_one(address):
+                return address, source
+        return None, "offline"
 
     # ---- one cycle ----
 
@@ -465,6 +615,7 @@ class SyncWorker:
             )
         except Exception as e:
             log.warning("listing fetch failed: %s", e)
+            await self._classify_listing_failure(e)
             return False
         if self._provider.get().sync_ro_only:
             listing = list(_filter_ro_only(listing))
@@ -475,14 +626,42 @@ class SyncWorker:
             "summary": summary,
             "queue": q.list_all(self.db, limit=200),
         })
+        q.emit_queue_changed(self.db, self.hub)
+        if self._last_error_kind == "auth_failure":
+            await self._clear_sync_error()
         return True
 
+    def _note_reachability(self, online: bool, source: str = "") -> None:
+        """Log dashcam online/offline only when it actually changes, so
+        the Logs tab records the transition without one line per cycle."""
+        if self._online == online:
+            return
+        self._online = online
+        if online:
+            log.info("dashcam online (%s)", source or "primary")
+        else:
+            log.info("dashcam offline")
+
     async def _cycle(self) -> bool:
-        reachable = await self._probe()
-        await self.hub.broadcast({
-            "type": "dashcam_online" if reachable else "dashcam_offline",
-        })
-        if not reachable:
+        # A paused worker does no dashcam work — no probe, no listing —
+        # so "sync paused" stays the last word in the log until resume.
+        if self._paused.is_set():
+            return False
+        await self._emit_disk_pct()
+        if not await self._check_recordings_writable():
+            return False
+        active, source = await self._select_active_address()
+        self._active_address = active
+        if active is not None:
+            self._note_reachability(True, source)
+            await self.hub.broadcast({
+                "type": "dashcam_online",
+                "source": source,
+                "address": active,
+            })
+        else:
+            self._note_reachability(False)
+            await self.hub.broadcast({"type": "dashcam_offline"})
             return False
 
         # Initial listing — failure here aborts the cycle so
@@ -510,7 +689,7 @@ class SyncWorker:
                 break
             # Re-probe occasionally so we don't burn a whole
             # retry budget on a dashcam that's already gone.
-            if did_any and not await self._probe():
+            if did_any and not await self._probe_one(self._active_address):
                 await self.hub.broadcast({
                     "type": "dashcam_offline",
                 })
@@ -540,11 +719,11 @@ class SyncWorker:
                 await asyncio.to_thread(
                     scanner.scan,
                     self.db, snap.recordings, snap.grouping,
+                    self.hub, asyncio.get_running_loop(),
                 )
                 await scanner.sweep_missing_thumbs(
                     self.db, snap.recordings,
                 )
-                from . import retention as _retention
                 sink = WebSink(self.hub, asyncio.get_running_loop())
                 await asyncio.to_thread(
                     _retention.sweep,
@@ -552,11 +731,16 @@ class SyncWorker:
                     max_days=snap.retention_max_days,
                     disk_pct=snap.retention_disk_pct,
                     protect_ro=snap.retention_protect_ro,
+                    quota_gb=snap.recordings_quota_gb,
                     sink=sink,
+                    exclude=_retention.import_exclude_set(
+                        snap.recordings, snap.import_path
+                    ),
                 )
             except Exception:  # pragma: no cover — non-fatal
                 log.exception("post-cycle scan/thumb sweep failed")
 
+        await self._emit_disk_pct()
         await self.hub.broadcast({
             "type": "sync_done",
             "ok": True,
@@ -566,7 +750,7 @@ class SyncWorker:
 
     def _fetch_listing(self):
         snap = self._provider.get()
-        base = f"http://{snap.address}"
+        base = f"http://{self._active_address}"
         if snap.use_html_listing:
             return vfs.get_dashcam_filenames_html(base)
         return vfs.get_dashcam_filenames(base)
@@ -611,7 +795,7 @@ class SyncWorker:
                 datetime=recorded,
                 attr=None,
             )
-            base = f"http://{snap.address}"
+            base = f"http://{self._active_address}"
             try:
                 ok, _ = vfs.download_file_with(
                     base, rec, snap.recordings,
@@ -647,14 +831,27 @@ class SyncWorker:
                         base_url=base,
                         sink=sink,
                     )
-                return ok, None
+                return ok, None, False
+            except vfs.DownloadCancelled:
+                # Deliberate abort (pause/stop/unreachable): not a
+                # failure, so the caller must not burn an attempt.
+                return False, None, True
             except Exception as e:
-                return False, str(e)
+                return False, str(e), False
 
-        ok, err = await loop.run_in_executor(None, _blocking)
+        ok, err, cancelled = await loop.run_in_executor(None, _blocking)
+
+        if cancelled:
+            # Return the item to pending with its attempt refunded so it
+            # picks up cleanly on resume. download_file already logged the
+            # cancellation at INFO — no need to repeat it here.
+            q.mark_cancelled(self.db, item.id)
+            q.emit_queue_changed(self.db, self.hub)
+            return False
 
         if ok:
             q.mark_done(self.db, item.id)
+            q.emit_queue_changed(self.db, self.hub)
             return True
 
         new_state = q.mark_transient_failure(
@@ -663,6 +860,7 @@ class SyncWorker:
             err or "unknown",
             snap.max_attempts,
         )
+        q.emit_queue_changed(self.db, self.hub)
         await self.hub.broadcast({
             "type": "item_state_change",
             "filename": item.filename,

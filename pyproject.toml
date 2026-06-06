@@ -1,7 +1,21 @@
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
-filterwarnings = ["error"]
+filterwarnings = [
+    "error",
+    # amqtt broker thread leaves AF_UNIX sockets and its event loop
+    # unclosed on GC during session teardown — these are benign.
+    "ignore::ResourceWarning:amqtt",
+    "ignore:unclosed event loop:ResourceWarning",
+    "ignore:unclosed <socket.socket:ResourceWarning",
+    # When tests mutate settings, the SettingsProvider subscriber
+    # schedules MqttService.on_settings_changed via create_task.
+    # TestClient teardown can cancel the task before it ran, leaving
+    # the coroutine garbage-collected unawaited. Pure test-harness
+    # noise; the production loop awaits the task normally.
+    "ignore:.*on_settings_changed.*was never awaited:RuntimeWarning",
+    "ignore:Exception ignored in.*on_settings_changed:pytest.PytestUnraisableExceptionWarning",
+]
 
 [tool.ruff]
 line-length = 100

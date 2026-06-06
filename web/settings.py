@@ -41,7 +41,9 @@ class Snapshot:
     """Immutable view of every setting the running app may need."""
 
     address: str | None
+    address_fallback: str | None
     recordings: str
+    import_path: str
     grouping: str
     use_html_listing: bool
     gps_extract: bool
@@ -55,6 +57,8 @@ class Snapshot:
     retention_max_days: int
     retention_disk_pct: int
     retention_protect_ro: bool
+    recordings_quota_gb: int
+    disk_critical_pct: int
 
     password_hash: str
     session_secret: str
@@ -69,6 +73,18 @@ class Snapshot:
     distance_units: str
 
     is_unconfigured: bool
+
+    mqtt_enabled: bool
+    mqtt_host: str
+    mqtt_port: int
+    mqtt_username: str
+    mqtt_password: str
+    mqtt_tls: bool
+    mqtt_client_id: str
+    mqtt_discovery_prefix: str
+    mqtt_node_id: str
+    mqtt_discovery_enabled: bool
+    mqtt_qos: int
 
 
 class SettingsProvider:
@@ -209,7 +225,9 @@ class SettingsProvider:
         m = SettingsModel(**merged)
         return Snapshot(
             address=m.ADDRESS,
+            address_fallback=m.ADDRESS_FALLBACK,
             recordings=self._recordings,
+            import_path=m.IMPORT_PATH,
             grouping=m.GROUPING,
             use_html_listing=m.HTML,
             gps_extract=m.GPS_EXTRACT,
@@ -223,6 +241,8 @@ class SettingsProvider:
             retention_max_days=m.RETENTION_MAX_DAYS,
             retention_disk_pct=m.RETENTION_DISK_PCT,
             retention_protect_ro=m.RETENTION_PROTECT_RO,
+            recordings_quota_gb=m.RECORDINGS_QUOTA_GB,
+            disk_critical_pct=m.DISK_CRITICAL_PCT,
             password_hash=m.WEB_PASSWORD_HASH,
             session_secret=m.SESSION_SECRET,
             host=m.WEB_HOST,
@@ -233,6 +253,17 @@ class SettingsProvider:
             geocode_enabled=m.GEOCODE_ENABLED,
             distance_units=m.DISTANCE_UNITS,
             is_unconfigured=not m.WEB_PASSWORD_HASH,
+            mqtt_enabled=m.MQTT_ENABLED,
+            mqtt_host=m.MQTT_HOST,
+            mqtt_port=m.MQTT_PORT,
+            mqtt_username=m.MQTT_USERNAME,
+            mqtt_password=m.MQTT_PASSWORD,
+            mqtt_tls=m.MQTT_TLS,
+            mqtt_client_id=m.MQTT_CLIENT_ID,
+            mqtt_discovery_prefix=m.MQTT_DISCOVERY_PREFIX,
+            mqtt_node_id=m.MQTT_NODE_ID,
+            mqtt_discovery_enabled=m.MQTT_DISCOVERY_ENABLED,
+            mqtt_qos=m.MQTT_QOS,
         )
 
     # ---------------------------------------------------------- audit log

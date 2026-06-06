@@ -15,6 +15,7 @@ const state = {
   queueDays: [],           // list of day summaries from /api/queue/days
   queueDayItems: {},       // { 'YYYY-MM-DD': [items] } for expanded days
   queueExpanded: new Set(),
+  queueHoursExpanded: new Set(), // keys: "YYYY-MM-DD HH" (HH may be "??")
   queueSelected: new Set(),// filenames ticked
   filters: { driving: true, parking: true, ro: true },
   showMaps: localStorage.getItem("vfs.showMaps") !== "0",
@@ -30,6 +31,8 @@ const state = {
   // helpers (fmtDistance) don't need to read from settingsState
   // (which is only loaded when the Settings tab is visited).
   distanceUnits: "km",
+  logsFilter: null,        // { level, logger, q } currently shown in Logs tab
+  logsOldestId: null,      // smallest id loaded, for "Load older" pagination
 };
 
 // ---------- CSS variable bridge ----------
@@ -86,7 +89,10 @@ async function showApp() {
   openSocket();
   try {
     const s = await api("/api/sync/status");
-    updateSyncState(s.running, s.paused);
+    state.syncRunning = s.running;
+    state.syncPaused = s.paused;
+    // The WS snapshot will deliver the server-computed sync_status
+    // shortly; no direct updateSyncState call needed here.
   } catch {}
   try {
     const gs = await api("/api/archive/extract-gps/status");
@@ -161,21 +167,21 @@ document.getElementById("sync-toggle").addEventListener("click", async () => {
   } else {
     await api("/api/sync/resume", { method: "POST" });
   }
-  // Fetch fresh status — the WS event will follow shortly but
-  // a direct response avoids a visible lag on the button icon.
   const s = await api("/api/sync/status");
-  updateSyncState(s.running, s.paused);
+  state.syncRunning = s.running;
+  state.syncPaused = s.paused;
+  // The WS sync_status event will follow shortly; no direct call to
+  // updateSyncState here — the server-computed status is the truth.
 });
 
-function updateSyncState(running, paused) {
-  state.syncRunning = running;
-  state.syncPaused = paused;
-
+// state.syncStatus is one of: "downloading", "waiting", "paused", "error", null
+// state.syncStatusReason is a short human-readable string (only set in error)
+function updateSyncState(status) {
+  state.syncStatus = status;
+  // The toggle button's pause/resume behaviour still depends on
+  // syncRunning/syncPaused, which are derived from sync_state events
+  // (see handleEvent). Status is what drives the *visual* badge + icon.
   const btn = document.getElementById("sync-toggle");
-  // Use explicit setAttribute/removeAttribute on the SVG icons:
-  // some browsers don't propagate the `.hidden` IDL property
-  // setter onto SVGElement reliably, which has bitten us with
-  // the icon staying visible when JS said it should be hidden.
   const setVisible = (el, visible) => {
     if (visible) el.removeAttribute("hidden");
     else el.setAttribute("hidden", "");
@@ -183,26 +189,33 @@ function updateSyncState(running, paused) {
   const iconPlay = document.getElementById("sync-icon-play");
   const iconPause = document.getElementById("sync-icon-pause");
   const iconSync = document.getElementById("sync-icon-sync");
+  const iconWarn = document.getElementById("sync-icon-warning");
 
   let show, title, klass;
-  if (!running) {
-    show = iconPlay;
-    title = "Start downloading";
-    klass = null;
-  } else if (paused) {
-    show = iconPause;
-    title = "Resume downloading";
-    klass = "paused";
+  if (status === "downloading") {
+    show = iconSync; title = "Pause downloading"; klass = "active";
+  } else if (status === "waiting") {
+    show = iconSync; title = "Pause downloading"; klass = "waiting";
+  } else if (status === "paused") {
+    show = iconPause; title = "Resume downloading"; klass = "paused";
+  } else if (status === "error") {
+    // Surface the reason on the button tooltip too — users hovering
+    // the icon (not the badge) should still see why we're in error.
+    show = iconWarn;
+    title = state.syncStatusReason
+      ? "Error: " + state.syncStatusReason
+      : "Error";
+    klass = "error";
   } else {
-    show = iconSync;
-    title = "Pause downloading";
-    klass = "active";
+    // Unknown / initial — fall back to play icon, no class.
+    show = iconPlay; title = "Start downloading"; klass = null;
   }
 
   setVisible(iconPlay, show === iconPlay);
   setVisible(iconPause, show === iconPause);
   setVisible(iconSync, show === iconSync);
-  btn.classList.remove("active", "paused");
+  setVisible(iconWarn, show === iconWarn);
+  btn.classList.remove("active", "paused", "waiting", "error");
   if (klass) btn.classList.add(klass);
   btn.title = title;
 }
@@ -226,6 +239,8 @@ function routeTo(hash) {
   });
   document.getElementById("view-archive").hidden = tab !== "archive";
   document.getElementById("view-downloads").hidden = tab !== "downloads";
+  const logsView = document.getElementById("view-logs");
+  if (logsView) logsView.hidden = tab !== "logs";
   const settingsView = document.getElementById("view-settings");
   if (settingsView) settingsView.hidden = tab !== "settings";
   if (tab === "archive") {
@@ -236,6 +251,7 @@ function routeTo(hash) {
     stopArchiveAutoRefresh();
   }
   if (tab === "downloads") loadQueue();
+  if (tab === "logs") loadLogs();
   if (tab === "settings") loadSettings();
 }
 
@@ -562,6 +578,13 @@ function fmtDuration(seconds) {
   const h = Math.floor(m / 60);
   const rem = m % 60;
   return rem ? `${h}h ${rem}m` : `${h}h`;
+}
+
+// ETA wants sub-minute precision; fmtDuration rounds those to "0 min".
+function fmtEta(seconds) {
+  if (seconds == null) return "—";
+  if (seconds < 60) return `${Math.round(seconds)}s`;
+  return fmtDuration(seconds);
 }
 
 function renderStopCard(stop, clips, idx) {
@@ -992,9 +1015,13 @@ function updateArchiveActions() {
     if (v.rear) rears++;
     if (v.front && v.rear) both++;
   }
-  document.getElementById("export-join-front").disabled = fronts === 0;
-  document.getElementById("export-join-rear").disabled = rears === 0;
-  document.getElementById("export-pip").disabled = both === 0;
+  const hasFront = fronts > 0, hasRear = rears > 0, hasPair = both > 0;
+  document.getElementById("dl-orig-front").disabled = !hasFront;
+  document.getElementById("dl-orig-rear").disabled = !hasRear;
+  document.getElementById("export-join-front").disabled = !hasFront;
+  document.getElementById("export-join-rear").disabled = !hasRear;
+  document.getElementById("export-pip-front").disabled = !hasPair;
+  document.getElementById("export-pip-rear").disabled = !hasPair;
   document.getElementById("clear-selection").disabled = n === 0;
 }
 
@@ -1013,12 +1040,40 @@ function clearSelection() {
   updateArchiveActions();
 }
 
+function downloadOriginals(slot) {
+  // slot: "front" | "rear". Download each selected original clip
+  // as its own file (no ZIP). The clip stream endpoint sends
+  // Content-Disposition: attachment with the dashcam basename, so
+  // a same-origin anchor click triggers a named download. Stagger
+  // the clicks (150ms) so the browser queues them instead of
+  // dropping all but the last, and shows its one "allow multiple
+  // downloads" prompt once — small enough that a big selection
+  // doesn't take ages to fire.
+  const ids = [];
+  for (const v of state.archiveSelected.values()) {
+    if (slot === "front" && v.front) ids.push(v.front);
+    else if (slot === "rear" && v.rear) ids.push(v.rear);
+  }
+  if (!ids.length) return;
+  ids.forEach((id, i) => {
+    setTimeout(() => {
+      const a = document.createElement("a");
+      a.href = `/api/archive/clip/${id}/video`;
+      // No download attr: rely on the server's Content-Disposition
+      // filename (the original basename) rather than the URL tail.
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    }, i * 150);
+  });
+}
+
 async function submitExport(type) {
   const ids = [];
   for (const v of state.archiveSelected.values()) {
     if (type === "join_front" && v.front) ids.push(v.front);
     else if (type === "join_rear" && v.rear) ids.push(v.rear);
-    else if (type === "pip") {
+    else if (type === "pip" || type === "pip_rear") {
       if (v.front) ids.push(v.front);
       if (v.rear) ids.push(v.rear);
     }
@@ -1068,12 +1123,18 @@ document.getElementById("exports-toggle").addEventListener("click", () => {
   setExportsPanelOpen(!open);
 });
 
+document.getElementById("dl-orig-front")
+  .addEventListener("click", () => downloadOriginals("front"));
+document.getElementById("dl-orig-rear")
+  .addEventListener("click", () => downloadOriginals("rear"));
 document.getElementById("export-join-front")
   .addEventListener("click", () => submitExport("join_front"));
 document.getElementById("export-join-rear")
   .addEventListener("click", () => submitExport("join_rear"));
-document.getElementById("export-pip")
+document.getElementById("export-pip-front")
   .addEventListener("click", () => submitExport("pip"));
+document.getElementById("export-pip-rear")
+  .addEventListener("click", () => submitExport("pip_rear"));
 document.getElementById("clear-selection")
   .addEventListener("click", clearSelection);
 
@@ -1108,6 +1169,64 @@ function updateExportsSummary(jobs) {
     : "Export jobs";
 }
 
+// Human-readable export type labels. These echo the toolbar
+// buttons: Join F/R and the PiP Fr/Rf (front-main / rear-main).
+const EXPORT_TYPE_LABELS = {
+  join_front: "Join Front",
+  join_rear: "Join Rear",
+  pip: "PiP Fr",
+  pip_rear: "PiP Rf",
+};
+
+// Heroicons solid (MIT) — arrow-down-tray (download) + trash (delete),
+// matching the inline-SVG / currentColor pattern used in the header.
+const EXPORT_ICON_DOWNLOAD =
+  '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" ' +
+  'aria-hidden="true"><path fill-rule="evenodd" d="M12 2.25a.75.75 0 0 1 ' +
+  '.75.75v11.69l3.22-3.22a.75.75 0 1 1 1.06 1.06l-4.5 4.5a.75.75 0 0 1-1.06 ' +
+  '0l-4.5-4.5a.75.75 0 1 1 1.06-1.06l3.22 3.22V3a.75.75 0 0 1 .75-.75Zm-9 ' +
+  '13.5a.75.75 0 0 1 .75.75v2.25a1.5 1.5 0 0 0 1.5 1.5h13.5a1.5 1.5 0 0 0 ' +
+  '1.5-1.5V16.5a.75.75 0 0 1 1.5 0v2.25a3 3 0 0 1-3 3H5.25a3 3 0 0 1-3-3V' +
+  '16.5a.75.75 0 0 1 .75-.75Z" clip-rule="evenodd"/></svg>';
+
+const EXPORT_ICON_TRASH =
+  '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" ' +
+  'aria-hidden="true"><path fill-rule="evenodd" d="M16.5 4.478v.227a48.816 ' +
+  '48.816 0 0 1 3.878.512.75.75 0 1 1-.256 1.478l-.209-.035-1.005 13.07a3 ' +
+  '3 0 0 1-2.991 2.77H8.084a3 3 0 0 1-2.991-2.77L4.087 6.66l-.209.035a.75' +
+  '.75 0 0 1-.256-1.478A48.567 48.567 0 0 1 7.5 4.705v-.227c0-1.564 1.213-' +
+  '2.9 2.816-2.951a52.662 52.662 0 0 1 3.369 0c1.603.051 2.815 1.387 2.815 ' +
+  '2.951Zm-6.136-1.452a51.196 51.196 0 0 1 3.273 0C14.39 3.05 15 3.684 15 ' +
+  '4.478v.113a49.488 49.488 0 0 0-6 0v-.113c0-.794.609-1.428 1.364-1.452Z' +
+  'm-.355 5.945a.75.75 0 1 0-1.5.058l.347 9a.75.75 0 1 0 1.499-.058l-.346-' +
+  '9Zm5.48.058a.75.75 0 1 0-1.498-.058l-.347 9a.75.75 0 0 0 1.5.058l.345-' +
+  '9Z" clip-rule="evenodd"/></svg>';
+
+function escapeExportText(s) {
+  const d = document.createElement("div");
+  d.textContent = String(s);
+  return d.innerHTML;
+}
+
+// "15 Mar 14:30–15:02" (same day), "15 Mar – 17 Mar" (spans days),
+// or "—" when no range was captured (jobs predating the feature, or
+// clips that couldn't be resolved at enqueue time).
+function formatExportRange(start, end) {
+  if (!start) return "—";
+  const s = new Date(start * 1000);
+  const e = new Date((end || start) * 1000);
+  const dOpts = { day: "numeric", month: "short" };
+  const tOpts = { hour: "2-digit", minute: "2-digit", hour12: false };
+  if (s.toDateString() === e.toDateString()) {
+    const day = s.toLocaleDateString([], dOpts);
+    const st = s.toLocaleTimeString([], tOpts);
+    const et = e.toLocaleTimeString([], tOpts);
+    return st === et ? `${day} ${st}` : `${day} ${st}–${et}`;
+  }
+  return `${s.toLocaleDateString([], dOpts)} – ` +
+    `${e.toLocaleDateString([], dOpts)}`;
+}
+
 function renderExportJobs(jobs) {
   updateExportsSummary(jobs);
   const el = document.getElementById("exports-list");
@@ -1121,8 +1240,8 @@ function renderExportJobs(jobs) {
   table.className = "exports-table";
   table.innerHTML = `
     <thead><tr>
-      <th>ID</th><th>Type</th><th>State</th><th>Progress</th>
-      <th>Created</th><th></th>
+      <th>Type</th><th>Status</th><th>Footage</th>
+      <th class="exports-actions-col"></th>
     </tr></thead>
     <tbody></tbody>
   `;
@@ -1130,35 +1249,65 @@ function renderExportJobs(jobs) {
   const live = state.exportProgress || {};
   for (const j of jobs) {
     const tr = document.createElement("tr");
-    const created = j.created_at
-      ? new Date(j.created_at * 1000).toLocaleString() : "—";
     // Running jobs: prefer the live progress stream if we have
     // one; the DB row is only updated at finish.
     const liveHit = live[j.id];
     const progVal = liveHit && liveHit.progress != null
       ? liveHit.progress
       : j.progress;
-    const terminal = ["done", "failed", "cancelled"].includes(j.state);
-    let pct;
-    if (j.state === "done") pct = "100%";
-    else if (terminal) pct = "—";
-    else pct = progVal != null ? Math.round(progVal * 100) + "%" : "—";
-    const stage = liveHit && liveHit.stage && !terminal
-      ? ` · ${liveHit.stage}` : "";
-    const actions = [];
-    if (j.state === "done") {
-      actions.push(
-        `<a href="/api/exports/${j.id}/download" download>Download</a>`,
-      );
+
+    // Type badge.
+    const label = EXPORT_TYPE_LABELS[j.type] || j.type;
+    const typeCell =
+      `<span class="export-type">${escapeExportText(label)}</span>`;
+
+    // Status: state text, plus an inline progress bar while running
+    // and the error message on failure.
+    let statusCell = `<span class="state-${j.state}">${j.state}</span>`;
+    if (j.state === "failed" && j.error) {
+      statusCell +=
+        `<span class="export-err"> · ${escapeExportText(j.error)}</span>`;
     }
-    actions.push(`<button type="button" class="export-delete" data-id="${j.id}">Delete</button>`);
+    if (j.state === "running") {
+      const pct = progVal != null ? Math.round(progVal * 100) : 0;
+      const stage = liveHit && liveHit.stage ? ` · ${liveHit.stage}` : "";
+      statusCell +=
+        `<div class="export-progress" role="progressbar" ` +
+        `aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100">` +
+        `<div class="export-progress-fill" style="width:${pct}%"></div>` +
+        `</div><span class="export-stage">${pct}%` +
+        `${escapeExportText(stage)}</span>`;
+    }
+
+    // Footage: captured date range + clip count.
+    const range = formatExportRange(j.clip_start, j.clip_end);
+    const n = j.clip_count || 0;
+    const footageCell = range === "—"
+      ? '<span class="export-count">—</span>'
+      : `${escapeExportText(range)}` +
+        (n ? `<span class="export-count"> · ${n} ` +
+          `clip${n === 1 ? "" : "s"}</span>` : "");
+
+    // Actions: download (when ready) + delete. The download slot is
+    // always reserved — an invisible placeholder when there's no
+    // download — so the bin stays pinned to the right and never
+    // jumps across as jobs finish.
+    const dl = j.state === "done"
+      ? `<a class="export-action" href="/api/exports/${j.id}/download" ` +
+        `download title="Download" aria-label="Download export">` +
+        `${EXPORT_ICON_DOWNLOAD}</a>`
+      : `<span class="export-action export-action--empty" ` +
+        `aria-hidden="true"></span>`;
+    const del =
+      `<button type="button" class="export-action export-delete" ` +
+      `data-id="${j.id}" title="Delete" aria-label="Delete export">` +
+      `${EXPORT_ICON_TRASH}</button>`;
+
     tr.innerHTML = `
-      <td>${j.id}</td>
-      <td>${j.type}</td>
-      <td class="state-${j.state}">${j.state}${j.error ? " · " + j.error : ""}</td>
-      <td>${pct}${stage}</td>
-      <td>${created}</td>
-      <td>${actions.join(" · ")}</td>
+      <td>${typeCell}</td>
+      <td class="export-status">${statusCell}</td>
+      <td class="export-footage">${footageCell}</td>
+      <td class="export-actions">${dl}${del}</td>
     `;
     tbody.appendChild(tr);
   }
@@ -1307,6 +1456,50 @@ function renderPagination(total) {
 
 // ---------- Downloads ----------
 
+// Two-digit hour ("00".."23") for a queue item, derived from the
+// dashcam filename (YYYY_MMDD_HHMMSS_…). Filename-derived (not
+// recorded_at) to stay timezone-stable and consistent with the
+// server's day grouping (_day_expr in services/queue.py). Names that
+// don't match bucket under "??" so they stay visible and sort last.
+function hourKeyForItem(it) {
+  const m = /^\d{4}_\d{4}_(\d{2})/.exec(it.filename || "");
+  return m ? m[1] : "??";
+}
+
+// Bucket a day's items by hour. Returns [{ hour, items }] with hours
+// newest-first and any "??" bucket last.
+function groupItemsByHour(items) {
+  const buckets = new Map();
+  for (const it of items) {
+    const hh = hourKeyForItem(it);
+    if (!buckets.has(hh)) buckets.set(hh, []);
+    buckets.get(hh).push(it);
+  }
+  const keys = [...buckets.keys()].sort((a, b) => {
+    if (a === "??") return 1;
+    if (b === "??") return -1;
+    return Number(b) - Number(a);
+  });
+  return keys.map((hh) => ({ hour: hh, items: buckets.get(hh) }));
+}
+
+// Per-hour counts + summed bytes for the hour row, computed client-side
+// from the bucket. State counts use bare keys (pending/downloading/done/
+// failed/gone) and are consumed only by renderQueueHour — not the
+// server-derived day summaries (which use *_count) — so they deliberately
+// diverge from that naming.
+function hourSummary(items) {
+  const s = {
+    clip_count: items.length, total_bytes: 0,
+    pending: 0, downloading: 0, done: 0, failed: 0, gone: 0,
+  };
+  for (const it of items) {
+    s.total_bytes += it.remote_size || 0;
+    if (Object.prototype.hasOwnProperty.call(s, it.state)) s[it.state]++;
+  }
+  return s;
+}
+
 function queueKindParams(q) {
   q.set("driving", state.queueKinds.driving ? "true" : "false");
   q.set("parking", state.queueKinds.parking ? "true" : "false");
@@ -1324,6 +1517,11 @@ async function loadQueue() {
   const liveDays = new Set(data.days.map((d) => d.day));
   for (const d of Object.keys(state.queueDayItems)) {
     if (!liveDays.has(d)) delete state.queueDayItems[d];
+  }
+  for (const key of [...state.queueHoursExpanded]) {
+    if (!liveDays.has(key.split(" ")[0])) {
+      state.queueHoursExpanded.delete(key);
+    }
   }
   // Refresh items for any expanded days so live counts stay in sync.
   await Promise.all(
@@ -1452,20 +1650,105 @@ function renderQueueDayCard(d) {
 
   if (expanded && state.queueDayItems[d.day]) {
     const body = el.querySelector(".queue-day-body");
-    body.appendChild(renderDayItemsTable(d.day, state.queueDayItems[d.day]));
+    body.appendChild(renderDayHours(d.day, state.queueDayItems[d.day]));
   }
 
   return el;
 }
 
-function renderDayItemsTable(day, items) {
+function renderDayHours(day, items) {
   const wrap = document.createElement("div");
+  wrap.className = "queue-hours";
   if (!items.length) {
     wrap.innerHTML = `<p style="color:var(--muted);padding:8px">
       No files match this filter.
     </p>`;
     return wrap;
   }
+  for (const group of groupItemsByHour(items)) {
+    wrap.appendChild(renderQueueHour(day, group.hour, group.items));
+  }
+  return wrap;
+}
+
+function renderQueueHour(day, hh, items) {
+  const el = document.createElement("div");
+  el.className = "queue-hour";
+  el.dataset.hour = hh;
+  const key = `${day} ${hh}`;
+  const expanded = state.queueHoursExpanded.has(key);
+  const s = hourSummary(items);
+  const checkState = hourCheckState(day, hh);
+  const hasPending = s.pending > 0;
+  const label = hh === "??" ? "Unknown time" : `${hh}:00–${hh}:59`;
+
+  const pieces = [];
+  if (s.downloading) pieces.push(`<span class="state-downloading">${s.downloading} downloading</span>`);
+  if (s.pending)     pieces.push(`<span class="state-pending">${s.pending} pending</span>`);
+  if (s.done)        pieces.push(`<span class="state-done">${s.done} done</span>`);
+  if (s.failed)      pieces.push(`<span class="state-failed">${s.failed} failed</span>`);
+  if (s.gone)        pieces.push(`<span class="state-gone">${s.gone} gone</span>`);
+
+  el.innerHTML = `
+    <div class="queue-hour-header">
+      <span class="caret">${expanded ? "▾" : "▸"}</span>
+      <input type="checkbox" class="qh-check" data-hour="${hh}"
+             ${checkState === "checked" ? "checked" : ""}
+             ${!hasPending ? "disabled title='No pending clips'" : ""} />
+      <span class="hour-label">${label}</span>
+      <span class="meta">${s.clip_count} clips · ${fmtMB(s.total_bytes)}</span>
+      <div class="state-breakdown">${pieces.join("")}</div>
+    </div>
+    <div class="queue-hour-body" ${expanded ? "" : "hidden"}></div>
+  `;
+
+  const checkbox = el.querySelector(".qh-check");
+  if (checkState === "indeterminate") checkbox.indeterminate = true;
+  checkbox.addEventListener("click", (e) => e.stopPropagation());
+  checkbox.addEventListener("change", (e) => {
+    // Recompute live: this row updates surgically (no full re-render),
+    // so a captured checkState would go stale across repeated clicks and
+    // break deselect on an hour that began indeterminate.
+    const live = hourCheckState(day, hh);
+    const shouldSelect = e.target.checked || live === "indeterminate";
+    toggleHourSelection(day, hh, shouldSelect);
+    // Reflect onto any rendered file rows + recompute the headers,
+    // surgically — no full re-render, so scroll is preserved.
+    el.querySelectorAll(".queue-hour-body .qi-check").forEach((cb) => {
+      cb.checked = state.queueSelected.has(cb.value);
+    });
+    updateHourHeaderCheckbox(day, hh);
+    updateDayHeaderCheckbox(day);
+    renderQueueMeta();
+  });
+
+  const header = el.querySelector(".queue-hour-header");
+  header.addEventListener("click", (e) => {
+    if (e.target.closest(".qh-check")) return;
+    const body = el.querySelector(".queue-hour-body");
+    const caret = el.querySelector(".caret");
+    if (state.queueHoursExpanded.has(key)) {
+      state.queueHoursExpanded.delete(key);
+      body.hidden = true;
+      body.innerHTML = "";
+      caret.textContent = "▸";
+    } else {
+      state.queueHoursExpanded.add(key);
+      body.appendChild(renderHourBody(day, hh, items));
+      body.hidden = false;
+      caret.textContent = "▾";
+    }
+  });
+
+  if (expanded) {
+    el.querySelector(".queue-hour-body")
+      .appendChild(renderHourBody(day, hh, items));
+  }
+  return el;
+}
+
+function renderHourBody(day, hh, items) {
+  const wrap = document.createElement("div");
   const table = document.createElement("table");
   table.className = "queue-items";
   table.innerHTML = `
@@ -1484,8 +1767,7 @@ function renderDayItemsTable(day, items) {
   const tbody = table.querySelector("tbody");
   for (const it of items) {
     const tr = document.createElement("tr");
-    const size = it.remote_size
-      ? fmtMB(it.remote_size) : "—";
+    const size = it.remote_size ? fmtMB(it.remote_size) : "—";
     const ts = it.recorded_at
       ? new Date(it.recorded_at * 1000).toLocaleTimeString() : "—";
     const pos = it.queue_position === 0 ? "▶" :
@@ -1512,9 +1794,11 @@ function renderDayItemsTable(day, items) {
     if (!cb) return;
     if (cb.checked) state.queueSelected.add(cb.value);
     else state.queueSelected.delete(cb.value);
-    // Update just this day's header checkbox without a full re-render,
-    // so the user's scroll position isn't lost.
+    // Update this file's hour checkbox and the day checkbox in place,
+    // preserving scroll position (no re-render).
+    updateHourHeaderCheckbox(day, hh);
     updateDayHeaderCheckbox(day);
+    renderQueueMeta();
   });
   wrap.appendChild(table);
   return wrap;
@@ -1559,6 +1843,54 @@ function updateDayHeaderCheckbox(day) {
   const cb = card.querySelector(".qd-check");
   const selected = countSelectedInDay(day);
   const st = dayCheckState(summary, selected);
+  cb.indeterminate = st === "indeterminate";
+  cb.checked = st === "checked";
+}
+
+// ---- Hour-level selection (twins of the day helpers above) ----
+
+function itemsInHour(day, hh) {
+  const items = state.queueDayItems[day] || [];
+  return items.filter((it) => hourKeyForItem(it) === hh);
+}
+
+function hourPendingCount(day, hh) {
+  let n = 0;
+  for (const it of itemsInHour(day, hh)) if (it.state === "pending") n++;
+  return n;
+}
+
+function countSelectedInHour(day, hh) {
+  let n = 0;
+  for (const it of itemsInHour(day, hh)) {
+    if (it.state === "pending" && state.queueSelected.has(it.filename)) n++;
+  }
+  return n;
+}
+
+function hourCheckState(day, hh) {
+  const pending = hourPendingCount(day, hh);
+  if (!pending) return "unchecked";
+  const sel = countSelectedInHour(day, hh);
+  if (sel === 0) return "unchecked";
+  if (sel >= pending) return "checked";
+  return "indeterminate";
+}
+
+function toggleHourSelection(day, hh, select) {
+  for (const it of itemsInHour(day, hh)) {
+    if (it.state !== "pending") continue;
+    if (select) state.queueSelected.add(it.filename);
+    else state.queueSelected.delete(it.filename);
+  }
+}
+
+function updateHourHeaderCheckbox(day, hh) {
+  const card = document.querySelector(`.queue-day[data-day="${day}"]`);
+  if (!card) return;
+  const cb = card.querySelector(`.qh-check[data-hour="${hh}"]`);
+  if (!cb) return;
+  const st = hourCheckState(day, hh);
   cb.indeterminate = st === "indeterminate";
   cb.checked = st === "checked";
 }
@@ -1609,15 +1941,40 @@ document.getElementById("q-prio-recent").addEventListener("click", async () => {
 function renderQueueMeta() {
   let total = 0;
   let pending = 0;
+  let failed = 0;
   for (const d of state.queueDays) {
     total += d.clip_count;
     pending += d.pending_count;
+    failed += d.failed_count || 0;
   }
   const sel = state.queueSelected.size;
   let text = `${total} files across ${state.queueDays.length} days · ${pending} pending`;
   if (sel) text += ` · ${sel} selected`;
   document.getElementById("queue-meta").textContent = text;
+  updateRetryFailedButton(failed);
 }
+
+function updateRetryFailedButton(failedCount) {
+  const btn = document.getElementById("q-retry-failed");
+  if (!btn) return;
+  btn.hidden = failedCount === 0;
+  btn.textContent = `Retry failed (${failedCount})`;
+}
+
+// Re-queue every failed file. Empty body => retry all (server-side).
+document.getElementById("q-retry-failed").addEventListener("click", async () => {
+  const btn = document.getElementById("q-retry-failed");
+  if (!window.confirm(
+    "Retry all failed files? They'll be reset and re-queued for download."
+  )) return;
+  btn.disabled = true;
+  try {
+    await api("/api/queue/retry", { method: "POST", body: JSON.stringify({}) });
+    await loadQueue();  // refreshes counts; button hides itself when none remain
+  } finally {
+    btn.disabled = false;
+  }
+});
 
 function isDownloadsTabActive() {
   return !document.getElementById("view-downloads").hidden;
@@ -1627,6 +1984,152 @@ function refreshQueueIfVisible() {
   if (isDownloadsTabActive()) {
     loadQueue();
   }
+}
+
+// ---------- Logs tab ----------
+
+const LOG_LEVELNO = {
+  DEBUG: 10, INFO: 20, WARNING: 30, ERROR: 40, CRITICAL: 50,
+};
+const LOGS_PAGE = 200;       // server page size for history fetches
+const LOGS_MAX_ROWS = 1000;  // cap live-tail DOM growth over a long session
+
+function logsFilterParams() {
+  return {
+    level: document.getElementById("logs-level").value,
+    logger: document.getElementById("logs-logger").value.trim(),
+    q: document.getElementById("logs-q").value.trim(),
+  };
+}
+
+function logsQueryString(f, extra = {}) {
+  const params = new URLSearchParams({ level: f.level, limit: String(LOGS_PAGE), ...extra });
+  if (f.logger) params.set("logger", f.logger);
+  if (f.q) params.set("q", f.q);
+  return params.toString();
+}
+
+function renderLogRow(e) {
+  const row = document.createElement("div");
+  row.className = "log-line log-" + (e.level || "").toLowerCase();
+  row.dataset.id = e.id;
+
+  const head = document.createElement("div");
+  head.className = "log-head";
+
+  const ts = document.createElement("span");
+  ts.className = "log-ts";
+  ts.textContent = new Date(e.ts * 1000).toLocaleTimeString();
+
+  const lvl = document.createElement("span");
+  lvl.className = "log-level";
+  lvl.textContent = e.level;
+
+  const logger = document.createElement("span");
+  logger.className = "log-logger";
+  logger.textContent = e.logger;
+
+  const msg = document.createElement("span");
+  msg.className = "log-msg";
+  msg.textContent = e.message;
+
+  head.append(ts, lvl, logger, msg);
+  row.appendChild(head);
+
+  if (e.exc_text) {
+    head.classList.add("has-exc");
+    head.addEventListener("click", () => row.classList.toggle("open"));
+    const pre = document.createElement("pre");
+    pre.className = "log-exc";
+    pre.textContent = e.exc_text;
+    row.appendChild(pre);
+  }
+  return row;
+}
+
+async function loadLogs() {
+  const f = logsFilterParams();
+  state.logsFilter = f;
+  const list = document.getElementById("logs-list");
+  const older = document.getElementById("logs-older");
+  list.innerHTML = "";
+  let entries = [];
+  try {
+    entries = (await api(`/api/logs?${logsQueryString(f)}`)).entries;
+  } catch { return; }
+  if (!entries.length) {
+    const empty = document.createElement("div");
+    empty.className = "logs-empty";
+    empty.textContent = "No log entries match the current filter.";
+    list.appendChild(empty);
+  } else {
+    for (const e of entries) list.appendChild(renderLogRow(e));
+  }
+  state.logsOldestId = entries.length ? entries[entries.length - 1].id : null;
+  // A short page means there is no older history behind it.
+  if (older) {
+    const more = entries.length >= LOGS_PAGE;
+    older.disabled = !more;
+    older.textContent = more ? "Load older" : "No older entries";
+  }
+}
+
+async function loadOlderLogs() {
+  if (!state.logsOldestId) return;
+  const f = state.logsFilter || logsFilterParams();
+  const qs = logsQueryString(f, { before: String(state.logsOldestId) });
+  const older = document.getElementById("logs-older");
+  let entries = [];
+  try { entries = (await api(`/api/logs?${qs}`)).entries; }
+  catch { return; }
+  const list = document.getElementById("logs-list");
+  for (const e of entries) list.appendChild(renderLogRow(e));
+  if (entries.length) state.logsOldestId = entries[entries.length - 1].id;
+  if (older && entries.length < LOGS_PAGE) {
+    older.disabled = true;
+    older.textContent = "No older entries";
+  }
+}
+
+function logMatchesFilter(e, f) {
+  const min = LOG_LEVELNO[f.level] || 30;
+  const lvl = e.levelno || LOG_LEVELNO[e.level] || 0;
+  if (lvl < min) return false;
+  if (f.logger && !(e.logger || "").includes(f.logger)) return false;
+  if (f.q && !(e.message || "").toLowerCase().includes(f.q.toLowerCase())) {
+    return false;
+  }
+  return true;
+}
+
+function logsLive(e) {
+  const view = document.getElementById("view-logs");
+  const list = document.getElementById("logs-list");
+  if (!list || !view || view.hidden) return;
+  // NB: state.logsFilter only resyncs when loadLogs() runs (on a toolbar
+  // `change` or Refresh), so for a few seconds after editing a search box
+  // (which commits on blur/Enter) live rows are matched against the prior
+  // filter; loadLogs() re-renders cleanly on commit.
+  const f = state.logsFilter || logsFilterParams();
+  if (!logMatchesFilter(e, f)) return;
+  const placeholder = list.querySelector(".logs-empty");
+  if (placeholder) placeholder.remove();
+  const atTop = list.scrollTop <= 4;
+  list.insertBefore(renderLogRow(e), list.firstChild);
+  if (atTop) list.scrollTop = 0;
+  // Bound live-tail growth (the old event-log panel capped at 200). Trim the
+  // oldest rows and keep logsOldestId at the oldest visible id so paging stays
+  // contiguous.
+  if (list.children.length > LOGS_MAX_ROWS) {
+    while (list.children.length > LOGS_MAX_ROWS) list.removeChild(list.lastChild);
+    if (list.lastChild) state.logsOldestId = Number(list.lastChild.dataset.id);
+  }
+}
+
+document.getElementById("logs-refresh").addEventListener("click", loadLogs);
+document.getElementById("logs-older").addEventListener("click", loadOlderLogs);
+for (const id of ["logs-level", "logs-logger", "logs-q"]) {
+  document.getElementById(id).addEventListener("change", loadLogs);
 }
 
 function openSocket() {
@@ -1641,73 +2144,58 @@ function openSocket() {
   });
 }
 
-const MAX_LOG_ENTRIES = 200;
-
-function appendLog(ev) {
-  const container = document.getElementById("log-entries");
-  if (!container) return;
-  // Per-chunk progress is already shown live in the progress bar
-  // above (downloads) or the Export jobs table (exports); mirroring
-  // it in the log buries everything else.
-  if (ev.type === "item_progress" || ev.type === "export_progress") return;
-  const line = document.createElement("div");
-  line.className = "log-line";
-  const ts = new Date().toLocaleTimeString();
-  let detail = ev.type;
-  if (ev.type === "item_started") detail = `item_started: ${ev.filename}`;
-  else if (ev.type === "item_finished") detail = `item_finished: ${ev.filename} ${ev.ok ? "ok" : ev.error || "failed"}`;
-  else if (ev.type === "sync_state") detail = `sync_state: running=${ev.running} paused=${ev.paused}`;
-  else if (ev.type === "queue_reconciled") detail = `queue_reconciled: +${ev.added || 0} added, ${ev.marked_gone || 0} gone`;
-  else if (ev.type === "dashcam_delete") {
-    if (ev.ok) detail = `dashcam_delete: ${ev.filename} ok`;
-    else if (ev.reason === "size_mismatch"
-             && ev.local_size != null && ev.remote_size != null) {
-      const delta = ev.local_size - ev.remote_size;
-      const sign = delta >= 0 ? "+" : "";
-      detail = `dashcam_delete: ${ev.filename} skipped `
-        + `(size_mismatch: local=${ev.local_size} dashcam=${ev.remote_size}, ${sign}${delta})`;
-    }
-    else detail = `dashcam_delete: ${ev.filename} skipped (${ev.reason || "unknown"})`;
-  }
-  else if (ev.type === "retention_deleted") {
-    detail = `retention_deleted: ${ev.filename} (${ev.reason})`;
-  }
-  else if (ev.type === "snapshot") detail = "snapshot (initial state)";
-  line.innerHTML = `<span class="log-ts">${ts}</span> <span class="log-msg">${detail}</span>`;
-  container.appendChild(line);
-  while (container.children.length > MAX_LOG_ENTRIES) {
-    container.removeChild(container.firstChild);
-  }
-  container.scrollTop = container.scrollHeight;
-}
-
 function handleEvent(ev) {
-  appendLog(ev);
-  const statusEl = document.getElementById("dashcam-status");
+  const statusEl = document.getElementById("sync-status");
+  const STATUS_LABEL = {
+    downloading: "Downloading",
+    waiting: "Waiting",
+    paused: "Paused",
+    error: "Error",
+  };
+  const applyStatus = (status, reason) => {
+    state.syncStatus = status;
+    state.syncStatusReason = reason || null;
+    // For error states, surface the reason directly in the badge text
+    // rather than burying it in a hover-only tooltip — users won't
+    // know to hover, and on touch devices the tooltip is invisible.
+    let badgeText = STATUS_LABEL[status] || "";
+    if (status === "error" && reason) {
+      badgeText = "Error: " + reason;
+    }
+    statusEl.textContent = badgeText;
+    statusEl.className = "status " + (status || "");
+    statusEl.title = reason || "";
+    updateSyncState(status);
+  };
   switch (ev.type) {
     case "snapshot":
-      if (ev.state.dashcam_online === true) {
-        statusEl.textContent = "Dashcam online";
-        statusEl.className = "status online";
-      } else if (ev.state.dashcam_online === false) {
-        statusEl.textContent = "Dashcam offline";
-        statusEl.className = "status offline";
+      if (ev.state.sync_status) {
+        applyStatus(ev.state.sync_status, ev.state.sync_status_reason);
       }
       if (ev.state.current_item) updateCurrent(ev.state.current_item);
+      if (ev.state.session) updateSessionStats(ev.state.session);
       if (ev.state.sync_state) {
-        updateSyncState(ev.state.sync_state.running, ev.state.sync_state.paused);
+        state.syncRunning = ev.state.sync_state.running;
+        state.syncPaused = ev.state.sync_state.paused;
       }
+      state.dashcamSource = ev.state.dashcam_source || "primary";
+      updateConnectionChip();
+      break;
+    case "sync_status":
+      applyStatus(ev.status, ev.reason);
       break;
     case "sync_state":
-      updateSyncState(ev.running, ev.paused);
+      state.syncRunning = ev.running;
+      state.syncPaused = ev.paused;
+      // Status follow-up will arrive separately; don't drive the badge here.
       break;
     case "dashcam_online":
-      statusEl.textContent = "Dashcam online";
-      statusEl.className = "status online";
+      state.dashcamSource = ev.source || "primary";
+      updateConnectionChip();
       break;
     case "dashcam_offline":
-      statusEl.textContent = "Dashcam offline — retrying…";
-      statusEl.className = "status offline";
+      // Keep state.dashcamSource (last known) so the chip persists.
+      updateConnectionChip();
       break;
     case "item_started":
       updateCurrent({ filename: ev.filename, total: ev.total, bytes: 0 });
@@ -1720,6 +2208,9 @@ function handleEvent(ev) {
       document.getElementById("current-download").innerHTML = "";
       state.currentFilename = null;
       refreshQueueIfVisible();
+      break;
+    case "session_stats":
+      updateSessionStats(ev);
       break;
     case "queue_reconciled":
     case "sync_done":
@@ -1756,6 +2247,14 @@ function handleEvent(ev) {
         refreshExportJobs();
       }
       break;
+    case "import_started":
+    case "import_progress":
+    case "import_done":
+      if (window.__importOnEvent) window.__importOnEvent(ev);
+      break;
+    case "log":
+      logsLive(ev);
+      break;
   }
 }
 
@@ -1785,6 +2284,44 @@ function updateCurrent(info) {
     <div class="bar"><div style="width:${pct}%"></div></div>
   `;
   state.currentFilename = info.filename;
+}
+
+function updateSessionStats(s) {
+  const el = document.getElementById("session-stats");
+  if (!el) return;
+  if (!s || !s.active) {
+    el.hidden = true;
+    el.textContent = "";
+    return;
+  }
+  const parts = [];
+  if (s.avg_speed_bps != null) {
+    parts.push(`avg ${fmtBytes(s.avg_speed_bps)}/s`);
+  }
+  if (s.eta_seconds != null) {
+    parts.push(`ETA ${fmtEta(s.eta_seconds)}`);
+  }
+  parts.push(`${fmtBytes(s.session_bytes)} this session`);
+  el.textContent = "Session · " + parts.join(" · ");
+  el.hidden = false;
+}
+
+function updateConnectionChip() {
+  let chip = document.getElementById("conn-chip");
+  const onAlt = state.dashcamSource === "alternative";
+  if (!onAlt) {
+    if (chip) chip.remove();
+    return;
+  }
+  if (!chip) {
+    chip = document.createElement("span");
+    chip.id = "conn-chip";
+    chip.className = "kind-badge";
+    chip.title = "Connected to the camera via the alternative address";
+    chip.textContent = "via alternative";
+    const anchor = document.getElementById("sync-status");
+    if (anchor) anchor.insertAdjacentElement("beforebegin", chip);
+  }
 }
 
 // ---------- Settings ----------
@@ -1836,7 +2373,13 @@ function renderSettingsSection(name) {
     web: renderWebSection,
     security: renderSecuritySection,
     system: renderSystemSection,
+    mqtt: renderMqttSection,
   };
+  // Clear MQTT status polling if navigating away from that section.
+  if (name !== "mqtt" && _mqttStatusTimer) {
+    clearInterval(_mqttStatusTimer);
+    _mqttStatusTimer = null;
+  }
   pane.innerHTML = "";
   (fns[name] || fns.dashcam)(pane);
 }
@@ -1969,6 +2512,55 @@ function renderDashcamSection(pane) {
   row.appendChild(result);
   pane.appendChild(row);
 
+  const altRow = document.createElement("div");
+  altRow.className = "form-row";
+  const altLbl = document.createElement("label");
+  altLbl.textContent = "Alternative address";
+  altRow.appendChild(altLbl);
+  const altWrap = document.createElement("div");
+  altWrap.style.display = "flex";
+  altWrap.style.gap = "8px";
+  const altInp = textInput("ADDRESS_FALLBACK");
+  altWrap.appendChild(altInp);
+  const altTest = document.createElement("button");
+  altTest.type = "button";
+  altTest.textContent = "Test";
+  const altResult = document.createElement("span");
+  altResult.className = "hint";
+  altResult.style.margin = "0";
+  altTest.addEventListener("click", async () => {
+    altResult.textContent = "Testing…";
+    try {
+      const j = await api("/api/settings/test-dashcam", {
+        method: "POST",
+        body: JSON.stringify({ address: altInp.value }),
+      });
+      altResult.textContent = j.ok
+        ? `Reachable (${j.latency_ms}ms)`
+        : `Failed: ${j.error}`;
+    } catch (e) {
+      altResult.textContent = `Failed: ${e.message || e}`;
+    }
+  });
+  altWrap.appendChild(altTest);
+  altRow.appendChild(altWrap);
+
+  // Help text lives inside the field's form-row (like the Test result
+  // below it) so it's grouped with the field and constrained to the
+  // field width, rather than dangling as a wider detached paragraph.
+  // margin:0 lets the row's flex gap own the spacing.
+  const altNote = document.createElement("p");
+  altNote.className = "hint";
+  altNote.style.margin = "0";
+  altNote.textContent =
+    "Optional second IP/host for the SAME camera, used only when the " +
+    "primary is unreachable — for example downloading over a VPN when the " +
+    "car is parked elsewhere. NOT for a second camera.";
+  altRow.appendChild(altNote);
+
+  altRow.appendChild(altResult);
+  pane.appendChild(altRow);
+
   renderField(pane, "HTML", "Use HTML directory listing", checkbox("HTML"));
   const htmlNote = document.createElement("p");
   htmlNote.className = "hint";
@@ -2050,6 +2642,24 @@ function renderArchiveSection(pane) {
   h.style.marginTop = "24px";
   pane.appendChild(h);
 
+  // Live usage card. Sits between the heading and the threshold input
+  // so users can see what their threshold is being measured against.
+  const usageCard = document.createElement("div");
+  usageCard.className = "storage-usage";
+  usageCard.innerHTML = `
+    <div class="storage-usage-row">
+      <span class="storage-usage-label">Current usage</span>
+      <span class="storage-usage-value">…</span>
+    </div>
+    <div class="storage-usage-bar">
+      <div class="storage-usage-fill" style="width:0%"></div>
+      <div class="storage-usage-threshold" style="display:none"></div>
+    </div>
+    <p class="hint storage-usage-mode">…</p>
+  `;
+  pane.appendChild(usageCard);
+  refreshStorageUsage(usageCard);
+
   renderField(
     pane,
     "RETENTION_MAX_DAYS",
@@ -2059,8 +2669,14 @@ function renderArchiveSection(pane) {
   renderField(
     pane,
     "RETENTION_DISK_PCT",
-    "Trigger cleanup at N% disk usage (0 = disabled)",
+    "Trigger cleanup at N% of filesystem (0 = disabled)",
     textInput("RETENTION_DISK_PCT", { type: "number", min: 0, max: 99 }),
+  );
+  renderField(
+    pane,
+    "RECORDINGS_QUOTA_GB",
+    "Trigger cleanup at this many GiB of recordings (0 = disabled)",
+    textInput("RECORDINGS_QUOTA_GB", { type: "number", min: 0, max: 1048576 }),
   );
   renderField(
     pane,
@@ -2072,10 +2688,88 @@ function renderArchiveSection(pane) {
   rnote.className = "hint";
   rnote.textContent =
     "Cleanup runs after each sync cycle. Files older than the day cap are " +
-    "removed; if disk usage is over the threshold, oldest clips are removed " +
-    "first until under it. Both settings are optional — leave at 0 to disable.";
+    "always removed first. The two disk-pressure triggers below are " +
+    "independent — either or both may be set. Filesystem % is the right " +
+    "choice when recordings live on a dedicated volume. GiB quota is the " +
+    "right choice when recordings sit inside a Synology share / ZFS " +
+    "dataset / other quota-bound mount where the filesystem's reported " +
+    "free space doesn't reflect the actual limit. If both are set, " +
+    "cleanup runs whenever either is breached.";
   pane.appendChild(rnote);
+
+  renderField(
+    pane,
+    "DISK_CRITICAL_PCT",
+    "Flag an error at N% of filesystem full (0 = disabled)",
+    textInput("DISK_CRITICAL_PCT", { type: "number", min: 0, max: 100 }),
+  );
+  const cnote = document.createElement("p");
+  cnote.className = "hint";
+  cnote.textContent =
+    "When the filesystem reaches this level, sync stops and the status " +
+    "flips to an error (“disk N% full”). Keep it at or above the " +
+    "filesystem-% cleanup trigger above so retention gets a chance to free " +
+    "space first.";
+  pane.appendChild(cnote);
 }
+
+// ---- Storage usage card ----
+
+function _fmtBytes(n) {
+  if (!n || n <= 0) return "0 B";
+  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+  let i = 0;
+  while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+  return (n < 10 ? n.toFixed(1) : Math.round(n)) + " " + units[i];
+}
+
+async function refreshStorageUsage(card) {
+  if (!card || !card.isConnected) return;
+  let body;
+  try {
+    body = await api("/api/storage/usage");
+  } catch (_) {
+    return;
+  }
+  if (!card.isConnected) return;
+
+  const value = card.querySelector(".storage-usage-value");
+  const fill  = card.querySelector(".storage-usage-fill");
+  const mark  = card.querySelector(".storage-usage-threshold");
+  const mode  = card.querySelector(".storage-usage-mode");
+
+  if (body.total_bytes <= 0 || body.used_pct === null) {
+    value.textContent = "Unavailable";
+    fill.style.width = "0%";
+    mark.style.display = "none";
+    mode.textContent = body.mode === "quota"
+      ? "Quota set but path unreadable."
+      : "Could not read filesystem stats.";
+    return;
+  }
+
+  const pct = body.used_pct;
+  value.textContent =
+    `${pct.toFixed(1)}% — ${_fmtBytes(body.used_bytes)} of ${_fmtBytes(body.total_bytes)}`;
+  fill.style.width = Math.min(100, pct) + "%";
+
+  // Tint the fill if we're at or past the cleanup threshold.
+  fill.classList.toggle("over-threshold",
+    body.threshold_pct != null && pct >= body.threshold_pct);
+
+  if (body.threshold_pct != null && body.threshold_pct > 0) {
+    mark.style.display = "block";
+    mark.style.left = Math.min(100, body.threshold_pct) + "%";
+    mark.title = `Cleanup threshold: ${body.threshold_pct}%`;
+  } else {
+    mark.style.display = "none";
+  }
+
+  mode.textContent = body.mode === "quota"
+    ? `Measured against your ${_fmtBytes(body.total_bytes)} quota.`
+    : `Measured against the filesystem containing recordings.`;
+}
+
 
 function renderWebSection(pane) {
   renderField(pane, "WEB_HOST", "Bind host", textInput("WEB_HOST"));
@@ -2095,7 +2789,7 @@ function renderSecuritySection(pane) {
   pane.innerHTML = `
     <h3>Change password</h3>
     <div class="form-row"><label>Current password</label><input type="password" id="pw-current" autocomplete="current-password" /></div>
-    <div class="form-row"><label>New password (min 8)</label><input type="password" id="pw-new" autocomplete="new-password" /></div>
+    <div class="form-row"><label>New password (min 8 characters)</label><input type="password" id="pw-new" autocomplete="new-password" /></div>
     <div class="form-row"><label>Confirm new password</label><input type="password" id="pw-confirm" autocomplete="new-password" /></div>
     <div class="form-row"><label><input type="checkbox" id="pw-logout-others" /> Log out other sessions</label></div>
     <button type="button" id="pw-save">Change password</button>
@@ -2154,6 +2848,103 @@ function renderSystemSection(pane) {
     document.body.innerHTML = "<h1>Restarting…</h1><p>The page will reload in 5 seconds.</p>";
     setTimeout(() => window.location.reload(), 5000);
   });
+}
+
+// ---- MQTT section ----
+
+let _mqttStatusTimer = null;
+
+async function refreshMqttStatus() {
+  const el = document.getElementById("mqtt-status");
+  if (!el) { clearInterval(_mqttStatusTimer); _mqttStatusTimer = null; return; }
+  try {
+    const body = await api("/api/mqtt/status");
+    const dot  = el.querySelector(".dot");
+    const text = el.querySelector(".mqtt-status-text");
+    dot.className = "dot " + ({
+      connected:    "green",
+      connecting:   "amber",
+      reconnecting: "amber",
+      error:        "red",
+      disabled:     "grey",
+      idle:         "grey",
+    }[body.state] || "grey");
+    text.textContent = ({
+      connected:    `Connected (${body.detail || ""})`,
+      connecting:   `Connecting (${body.detail || ""})`,
+      reconnecting: `Reconnecting (${body.detail || ""})`,
+      error:        `Error: ${body.detail || ""}`,
+      disabled:     "Disabled",
+      idle:         body.detail || "Not configured",
+    }[body.state] || body.state);
+  } catch (_) { /* silently ignore if panel navigated away */ }
+}
+
+function renderMqttSection(pane) {
+  const hint = document.createElement("p");
+  hint.className = "hint";
+  hint.textContent =
+    "Publish state and accept actions over MQTT, with Home Assistant " +
+    "auto-discovery. See README for the topic structure.";
+  pane.appendChild(hint);
+
+  renderField(pane, "MQTT_ENABLED", "Enable MQTT", checkbox("MQTT_ENABLED"));
+  renderField(pane, "MQTT_HOST", "Broker host", textInput("MQTT_HOST"));
+  renderField(pane, "MQTT_PORT", "Port",
+              textInput("MQTT_PORT", { type: "number", min: 1, max: 65535 }));
+  renderField(pane, "MQTT_USERNAME", "Username", textInput("MQTT_USERNAME"));
+  renderField(pane, "MQTT_PASSWORD", "Password",
+              textInput("MQTT_PASSWORD", { type: "password" }));
+  renderField(pane, "MQTT_TLS", "Use TLS", checkbox("MQTT_TLS"));
+  renderField(pane, "MQTT_CLIENT_ID", "Client ID", textInput("MQTT_CLIENT_ID"));
+  renderField(pane, "MQTT_NODE_ID", "Node ID", textInput("MQTT_NODE_ID"));
+  renderField(pane, "MQTT_DISCOVERY_PREFIX", "Discovery prefix",
+              textInput("MQTT_DISCOVERY_PREFIX"));
+  renderField(pane, "MQTT_DISCOVERY_ENABLED", "Publish Home Assistant discovery",
+              checkbox("MQTT_DISCOVERY_ENABLED"));
+  renderField(pane, "MQTT_QOS", "QoS", select("MQTT_QOS", [0, 1, 2]));
+
+  // Status indicator
+  const statusEl = document.createElement("p");
+  statusEl.id = "mqtt-status";
+  statusEl.innerHTML = '<span class="dot grey"></span><span class="mqtt-status-text">Disabled</span>';
+  pane.appendChild(statusEl);
+
+  // Test connection button
+  const testBtn = document.createElement("button");
+  testBtn.type = "button";
+  testBtn.id = "mqtt-test-btn";
+  testBtn.textContent = "Test connection";
+  testBtn.addEventListener("click", async () => {
+    testBtn.disabled = true;
+    testBtn.textContent = "Testing…";
+    try {
+      const body = {
+        host:      valueOf("MQTT_HOST"),
+        port:      Number(valueOf("MQTT_PORT") || 1883),
+        username:  valueOf("MQTT_USERNAME"),
+        password:  valueOf("MQTT_PASSWORD"),
+        tls:       !!valueOf("MQTT_TLS"),
+        client_id: valueOf("MQTT_CLIENT_ID"),
+      };
+      const result = await api("/api/mqtt/test", {
+        method: "POST",
+        body: JSON.stringify(body),
+      });
+      alert(result.detail);
+    } catch (e) {
+      alert("Test failed: " + (e.message || e));
+    } finally {
+      testBtn.disabled = false;
+      testBtn.textContent = "Test connection";
+    }
+  });
+  pane.appendChild(testBtn);
+
+  // Initial status fetch + start polling (cleared when pane re-renders)
+  refreshMqttStatus();
+  if (_mqttStatusTimer) clearInterval(_mqttStatusTimer);
+  _mqttStatusTimer = setInterval(refreshMqttStatus, 5000);
 }
 
 function showRestartBanner() {
@@ -2222,4 +3013,219 @@ window.addEventListener("hashchange", () => {
   } catch {
     showLogin();
   }
+})();
+
+// ---- Import modal -------------------------------------------------------
+(function importModal() {
+  const modal = document.getElementById("import-modal");
+  if (!modal) return;
+  const $ = (id) => document.getElementById(id);
+  const show = (el) => el && el.classList.remove("hidden");
+  const hide = (el) => el && el.classList.add("hidden");
+  const csrfH = () => (state.csrf ? { "x-csrf-token": state.csrf } : {});
+
+  $("import-btn").addEventListener("click", () => {
+    hide($("import-summary")); hide($("import-progress"));
+    show(modal);
+  });
+  $("import-close").addEventListener("click", () => hide(modal));
+
+  modal.querySelectorAll(".import-tab").forEach((tab) => {
+    tab.addEventListener("click", () => {
+      modal.querySelectorAll(".import-tab").forEach((t) => t.classList.remove("active"));
+      tab.classList.add("active");
+      modal.querySelectorAll(".tab-pane").forEach((p) => hide(p));
+      show(modal.querySelector(`[data-pane="${tab.dataset.tab}"]`));
+    });
+  });
+
+  const RE = /^\d{4}_\d{4}_\d{6}_\d+.+\.MP4$/i;
+  const tsOf = (n) => {
+    const m = n.match(/^(\d{4})_(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})/);
+    return m ? Number(m.slice(1).join("")) : 0;
+  };
+
+  // --- Upload tab ---
+  // Each entry is { file, path } so the folder picker (relative path via
+  // webkitRelativePath) and drag-dropped folders (path from the
+  // FileSystemEntry walk) share one shape: the path drives RO detection
+  // server-side, the basename drives the write location.
+  let picked = [];
+  const dz = modal.querySelector(".dropzone");
+  const dzTitle = modal.querySelector(".dropzone-title");
+
+  function applySelection(items) {
+    picked = items
+      .filter((it) => RE.test(it.file.name))
+      .sort((a, b) => tsOf(b.file.name) - tsOf(a.file.name)); // newest-first
+    const skipped = items.length - picked.length;
+    dz.classList.toggle("has-files", picked.length > 0);
+    dzTitle.textContent = picked.length
+      ? `${picked.length} clip${picked.length === 1 ? "" : "s"} ready`
+      : "Drag a folder here, or click to browse";
+    $("import-upload-manifest").textContent = items.length
+      ? (picked.length
+          ? `${picked.length} recognised${skipped ? `, ${skipped} skipped` : ""} — newest first.`
+          : "No Viofo clips found in that folder.")
+      : "";
+    $("import-upload-go").disabled = picked.length === 0;
+  }
+
+  $("import-files").addEventListener("change", (e) => {
+    applySelection(
+      [...e.target.files].map((f) => ({ file: f, path: f.webkitRelativePath || f.name })),
+    );
+  });
+
+  // Drag-and-drop a folder onto the dropzone. The browser default is to
+  // navigate to the dropped item, so every handler must preventDefault.
+  const readEntries = (reader) =>
+    new Promise((res, rej) => reader.readEntries(res, rej));
+  async function walk(entry, prefix, out) {
+    const here = prefix ? `${prefix}/${entry.name}` : entry.name;
+    if (entry.isFile) {
+      out.push({ file: await new Promise((res, rej) => entry.file(res, rej)), path: here });
+    } else if (entry.isDirectory) {
+      const reader = entry.createReader();
+      let batch;
+      do {
+        batch = await readEntries(reader);
+        for (const child of batch) await walk(child, here, out);
+      } while (batch.length);
+    }
+  }
+
+  const stop = (e) => { e.preventDefault(); e.stopPropagation(); };
+  ["dragenter", "dragover"].forEach((ev) =>
+    dz.addEventListener(ev, (e) => { stop(e); dz.classList.add("dragging"); }));
+  dz.addEventListener("dragleave", (e) => {
+    if (!dz.contains(e.relatedTarget)) dz.classList.remove("dragging");
+  });
+  dz.addEventListener("drop", async (e) => {
+    stop(e);
+    dz.classList.remove("dragging");
+    const dt = e.dataTransfer;
+    // webkitGetAsEntry must be read synchronously, before any await.
+    const entries = dt.items
+      ? [...dt.items]
+          .filter((i) => i.kind === "file")
+          .map((i) => (i.webkitGetAsEntry ? i.webkitGetAsEntry() : null))
+          .filter(Boolean)
+      : [];
+    const plain = entries.length ? [] : [...dt.files];
+    const out = [];
+    for (const entry of entries) await walk(entry, "", out);
+    for (const f of plain) out.push({ file: f, path: f.name });
+    applySelection(out);
+  });
+
+  // Stop a near-miss drop (onto the card or backdrop) from navigating the
+  // page away while the modal is open; real drops on the zone are handled
+  // above. Only active while the modal is open, so app-wide DnD is untouched.
+  const guardStrayDrop = (e) => { if (!modal.classList.contains("hidden")) e.preventDefault(); };
+  window.addEventListener("dragover", guardStrayDrop);
+  window.addEventListener("drop", guardStrayDrop);
+
+  $("import-upload-go").addEventListener("click", async () => {
+    show($("import-progress")); hide($("import-summary"));
+    const tally = {};
+    for (let i = 0; i < picked.length; i++) {
+      const { file, path } = picked[i];
+      $("import-status").textContent = `Uploading ${file.name} (${i + 1}/${picked.length})`;
+      $("import-bar").style.width = `${(i / picked.length) * 100}%`;
+      let res;
+      try {
+        const r = await fetch("/api/import/upload", {
+          method: "POST",
+          credentials: "same-origin",
+          headers: {
+            ...csrfH(),
+            "X-Import-Path": path,
+            "X-Import-Size": String(file.size),
+            "Content-Type": "application/octet-stream",
+          },
+          body: file,
+        });
+        if (!r.ok) {
+          let detail = r.status;
+          try { detail = (await r.json()).detail || r.status; } catch (_) {}
+          res = { status: "error", detail: String(detail) };
+        } else {
+          res = await r.json();
+        }
+      } catch (err) {
+        res = { status: "error", detail: String(err) };
+      }
+      const key = res.status === "error" ? "errors" : res.status;
+      tally[key] = (tally[key] || 0) + 1;
+    }
+    $("import-bar").style.width = "100%";
+    await fetch("/api/archive/rescan", { method: "POST", credentials: "same-origin", headers: csrfH() });
+    renderSummary(tally);
+  });
+
+  // --- Folder tab ---
+  $("import-folder-scan").addEventListener("click", async () => {
+    const path = $("import-folder-path").value.trim() || null;
+    const r = await fetch("/api/import/scan", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { ...csrfH(), "Content-Type": "application/json" },
+      body: JSON.stringify({ path }),
+    });
+    if (!r.ok) {
+      $("import-folder-manifest").textContent = `Error: ${(await r.json()).detail || r.status}`;
+      hide($("import-folder-go"));
+      return;
+    }
+    const m = await r.json();
+    $("import-folder-manifest").textContent =
+      `${m.recognised.length} clip(s), ${m.skipped.length} skipped, ` +
+      `${(m.total_bytes / 1e9).toFixed(2)} GB${m.cross_volume ? " (external — copy)" : ""}.`;
+    $("import-folder-go").dataset.path = path || "";
+    show($("import-folder-go"));
+  });
+
+  $("import-folder-go").addEventListener("click", async (e) => {
+    const path = e.target.dataset.path || null;
+    show($("import-progress")); hide($("import-summary"));
+    $("import-status").textContent = "Starting…";
+    const r = await fetch("/api/import/ingest", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { ...csrfH(), "Content-Type": "application/json" },
+      body: JSON.stringify({ path }),
+    });
+    if (!r.ok) {
+      hide($("import-progress"));
+      let detail = r.status;
+      try { detail = (await r.json()).detail || r.status; } catch (_) {}
+      $("import-status").textContent = `Error: ${detail}`;
+      show($("import-status"));
+    }
+    // Progress arrives over the WebSocket (import_* events).
+  });
+
+  function renderSummary(t) {
+    hide($("import-progress"));
+    const el = $("import-summary");
+    el.textContent =
+      `Imported ${t.imported || 0}, duplicate ${t.already_present || 0}, ` +
+      `skipped (over quota) ${t.over_quota_older || 0}, ` +
+      `unrecognised ${t.not_recognised || 0}, errors ${t.errors || 0}.`;
+    show(el);
+    if (!document.getElementById("view-archive").hidden) loadDays();
+  }
+
+  // Fold folder-mode WS events into the same UI.
+  window.__importOnEvent = (ev) => {
+    if (ev.type === "import_started") {
+      show($("import-progress")); $("import-bar").style.width = "0%";
+    } else if (ev.type === "import_progress") {
+      $("import-bar").style.width = `${(ev.done / Math.max(ev.total, 1)) * 100}%`;
+      $("import-status").textContent = `${ev.filename} (${ev.done}/${ev.total})`;
+    } else if (ev.type === "import_done") {
+      renderSummary(ev);
+    }
+  };
 })();

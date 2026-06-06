@@ -28,6 +28,17 @@ from ._archive import Recording, downloaded_filename_re, get_filepath
 
 logger = logging.getLogger("viofosync_lib.protocol")
 
+
+class DownloadCancelled(Exception):
+    """Raised when ``download_file`` is deliberately aborted via its
+    ``cancel_check`` (user pause/stop, or lost reachability).
+
+    Distinct from the transient errors the retry loop swallows: a
+    cancellation must short-circuit retries and must not be counted as
+    a failed attempt by callers.
+    """
+
+
 # Tunables (mutated by viofosync_lib.download_file_with).
 socket_timeout = 10.0
 DEFAULT_DOWNLOAD_ATTEMPTS = 1
@@ -349,7 +360,7 @@ def download_file(base_url, recording, destination, group_name,
                 ) as resp, open(tmp_path, "wb") as out:
                     while True:
                         if cancel_check is not None and cancel_check():
-                            raise UserWarning(
+                            raise DownloadCancelled(
                                 "Download cancelled"
                             )
                         chunk = resp.read(64 * 1024)
@@ -371,6 +382,14 @@ def download_file(base_url, recording, destination, group_name,
                                 )
                                 last_emit = now
                 elapsed = time.perf_counter() - start
+            except DownloadCancelled:
+                # Deliberate abort (pause/stop/unreachable) — not a
+                # failure. Stop immediately without burning the rest of
+                # the retry budget; the caller requeues without penalty.
+                logger.info(
+                    f"Download of {recording.filename} cancelled"
+                )
+                raise
             except Exception as e:
                 logger.warning(
                     f"Download attempt {attempt} failed for "

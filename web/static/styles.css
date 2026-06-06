@@ -145,6 +145,9 @@ input[type="radio"] {
 }
 .icon-btn:hover { background: var(--panel-3); }
 .icon-btn.active { color: var(--ok); border-color: var(--ok); }
+/* Waiting: match the sync-status badge's amber so the button and badge
+ * read as the same state. */
+.icon-btn.waiting { color: var(--warn); border-color: var(--warn); }
 /* When the syncing icon is the visible one, give it a gentle
  * continuous spin so the button reads as "in progress". */
 .icon-btn.active #sync-icon-sync:not([hidden]) {
@@ -154,6 +157,20 @@ input[type="radio"] {
 @keyframes vfs-spin {
   from { transform: rotate(0deg); }
   to   { transform: rotate(360deg); }
+}
+/* In "waiting" state we still show the sync icon, but static. The
+ * .active class drives the spin; .waiting suppresses it. */
+#sync-toggle.waiting #sync-icon-sync {
+  animation: none;
+}
+#sync-toggle.error #sync-icon-warning {
+  /* Subtle pulse on the warning icon so the user notices a fault state
+   * without it being too aggressive. */
+  animation: warn-pulse 2s ease-in-out infinite;
+}
+@keyframes warn-pulse {
+  0%, 100% { opacity: 0.9; }
+  50% { opacity: 0.6; }
 }
 .icon-btn.paused {
   color: var(--err-text);
@@ -199,13 +216,21 @@ input[type="radio"] {
 #login-form button:hover { filter: brightness(1.06); background: var(--accent); }
 
 /* App chrome */
+/* The bar itself is full-bleed: background + border span the viewport. */
 #app header {
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+}
+/* The content inside is constrained to the same 1400px column as <main>
+ * and centred, so the brand / nav / actions line up with the page body
+ * on wide screens instead of hugging the viewport edge. */
+#app header .header-inner {
   display: flex;
   align-items: center;
   gap: 16px;
+  max-width: 1400px;
+  margin: 0 auto;
   padding: 12px 24px;
-  background: var(--panel);
-  border-bottom: 1px solid var(--border);
 }
 #app header h1 { margin: 0; font-size: 18px; }
 nav a {
@@ -241,14 +266,25 @@ nav a.active { background: var(--panel-2); }
 }
 .spacer { flex: 1; }
 .status {
-  padding: 4px 10px;
+  display: inline-flex; align-items: center;
+  height: 34px;
+  padding: 0 12px;
   border-radius: 999px;
   background: var(--panel-2);
   border: 1px solid var(--border);
   font-size: 12px;
 }
-.status.offline { color: var(--err-text); border-color: var(--err); }
-.status.online { color: var(--ok); border-color: var(--ok); }
+/* Four-state sync status badge. Colors reuse the existing palette so
+ * dark/light themes stay coherent — extend the palette only if a
+ * future revision adds new accent tokens. */
+.status.downloading { color: var(--ok); border-color: var(--ok); }
+.status.waiting     { color: var(--warn); border-color: var(--warn); }
+.status.paused      { color: var(--err-text); border-color: var(--err); }
+.status.error {
+  color: #ffffff;
+  background: #7f1d1d;
+  border-color: #7f1d1d;
+}
 
 main {
   padding: 24px;
@@ -306,6 +342,19 @@ main {
   box-shadow: 0 6px 16px oklch(0 0 0 / 0.45);
 }
 .archive-actions .spacer { flex: 1; }
+/* Grouped action buttons: Originals / Joined / PIP, each with a
+ * small muted label and short single/double-letter buttons so the
+ * whole set stays on one bar. */
+.archive-actions .action-group {
+  display: inline-flex; align-items: center; gap: 4px;
+}
+.archive-actions .action-label {
+  font-size: 12px; color: var(--muted);
+  font-weight: 500; margin-right: 2px;
+}
+.archive-actions .action-group button {
+  min-width: 34px;
+}
 .archive-actions #selection-count {
   font-size: 12px;
   color: var(--text); font-weight: 500;
@@ -369,13 +418,81 @@ main {
 }
 .exports-table { width: 100%; border-collapse: collapse; }
 .exports-table th, .exports-table td {
-  padding: 6px 10px; text-align: left;
+  padding: 7px 10px; text-align: left; vertical-align: middle;
   border-bottom: 1px solid var(--border); font-size: 13px;
 }
 .exports-table th { color: var(--muted); font-weight: 500; }
+.exports-table tbody tr:last-child td { border-bottom: none; }
+.exports-table tbody tr:hover { background: var(--panel-2); }
 .state-queued   { color: var(--muted); }
 .state-running  { color: var(--accent); }
 .state-cancelled { color: var(--warn); }
+
+/* Type badge — small accent-tinted pill. */
+.export-type {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--accent-10);
+  border: 1px solid var(--accent-35);
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+/* Status cell — state text + slim inline progress bar. */
+.export-status .export-err { color: var(--err-text); }
+.export-progress {
+  margin-top: 5px;
+  height: 4px;
+  width: 100%;
+  max-width: 160px;
+  background: var(--panel-3);
+  border-radius: 999px;
+  overflow: hidden;
+}
+.export-progress-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: inherit;
+  transition: width 200ms ease;
+}
+.export-stage {
+  display: block;
+  margin-top: 3px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+/* Footage cell — date range + clip count. */
+.export-footage { white-space: nowrap; }
+.export-count { color: var(--muted); }
+
+/* Actions — right-aligned icon buttons; the trailing delete button
+ * lines up in a column across rows, with download just left of it. */
+.exports-actions-col { width: 1%; }
+.export-actions { text-align: right; white-space: nowrap; }
+.export-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  vertical-align: middle;
+  text-decoration: none;
+}
+.export-action + .export-action { margin-left: 4px; }
+.export-action:hover { background: var(--panel-3); color: var(--text); }
+.export-delete:hover { color: var(--err-text); }
+/* Reserves the download slot so the bin never shifts. */
+.export-action--empty { visibility: hidden; cursor: default; }
 
 /* Day cards */
 .day {
@@ -639,6 +756,13 @@ main {
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.01em;
 }
+.session-stats {
+  color: var(--muted);
+  font-size: 13px;
+  margin-bottom: 10px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.01em;
+}
 #queue { width: 100%; border-collapse: collapse; }
 #queue th.sortable {
   cursor: pointer; user-select: none; white-space: nowrap;
@@ -676,7 +800,7 @@ main {
   letter-spacing: -0.005em;
 }
 .queue-day-header .meta { flex: 0 0 auto; }
-.queue-day-header .state-breakdown {
+.state-breakdown {
   flex: 1;
   display: flex;
   gap: 6px;
@@ -684,7 +808,7 @@ main {
   justify-content: flex-end;
   font-variant-numeric: tabular-nums;
 }
-.queue-day-header .state-breakdown span {
+.state-breakdown span {
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -698,7 +822,7 @@ main {
   color: var(--muted);
   white-space: nowrap;
 }
-.queue-day-header .state-breakdown span::before {
+.state-breakdown span::before {
   content: "";
   width: 6px;
   height: 6px;
@@ -706,38 +830,38 @@ main {
   flex: 0 0 auto;
   background: var(--muted);
 }
-.queue-day-header .state-breakdown .state-pending {
+.state-breakdown .state-pending {
   color: var(--muted);
 }
-.queue-day-header .state-breakdown .state-pending::before {
+.state-breakdown .state-pending::before {
   background: var(--muted);
 }
-.queue-day-header .state-breakdown .state-downloading {
+.state-breakdown .state-downloading {
   color: var(--accent);
   border-color: var(--accent-35);
   background: var(--accent-08);
 }
-.queue-day-header .state-breakdown .state-downloading::before {
+.state-breakdown .state-downloading::before {
   background: var(--accent);
 }
-.queue-day-header .state-breakdown .state-done {
+.state-breakdown .state-done {
   color: var(--ok);
 }
-.queue-day-header .state-breakdown .state-done::before {
+.state-breakdown .state-done::before {
   background: var(--ok);
 }
-.queue-day-header .state-breakdown .state-failed {
+.state-breakdown .state-failed {
   color: var(--err-text);
   border-color: oklch(0.62 0.20 28 / 0.30);
   background: oklch(0.62 0.20 28 / 0.06);
 }
-.queue-day-header .state-breakdown .state-failed::before {
+.state-breakdown .state-failed::before {
   background: var(--err);
 }
-.queue-day-header .state-breakdown .state-gone {
+.state-breakdown .state-gone {
   color: var(--warn);
 }
-.queue-day-header .state-breakdown .state-gone::before {
+.state-breakdown .state-gone::before {
   background: var(--warn);
 }
 .queue-day-header .caret { color: var(--muted); font-size: 12px; }
@@ -746,6 +870,32 @@ main {
 .queue-day-stale .queue-day-header h3,
 .queue-day-stale .queue-day-header .meta { opacity: 0.6; }
 .queue-day-body { padding: 8px 16px 16px; }
+
+/* Downloads — hour tier nested inside a day body */
+.queue-hours { display: flex; flex-direction: column; gap: 2px; }
+.queue-hour {
+  border-left: 2px solid var(--border);
+  margin-left: 6px;
+}
+.queue-hour-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 10px;
+  cursor: pointer;
+  border-radius: 6px;
+}
+.queue-hour-header:hover { background: rgba(255, 255, 255, 0.015); }
+.queue-hour-header .caret { color: var(--muted); font-size: 12px; }
+.queue-hour-header .qh-check { margin: 0; cursor: pointer; }
+.queue-hour-header .qh-check:disabled { cursor: not-allowed; opacity: 0.4; }
+.queue-hour-header .hour-label {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  min-width: 104px;
+}
+.queue-hour-header .meta { flex: 0 0 auto; color: var(--muted); font-size: 12px; }
+.queue-hour-body { padding: 4px 0 8px 18px; }
 
 .queue-items { width: 100%; border-collapse: collapse; }
 .queue-items th, .queue-items td {
@@ -829,33 +979,60 @@ main {
 }
 .modal-autoplay input { cursor: pointer; }
 
-/* Log panel */
-.log-panel {
-  margin-top: 24px;
+/* Logs tab */
+.logs-toolbar {
+  display: flex; align-items: center; gap: 10px;
+  margin-bottom: 12px; flex-wrap: wrap;
+}
+.logs-toolbar .logs-level-label {
+  display: flex; align-items: center; gap: 6px;
+  color: var(--muted); font-size: 13px;
+}
+.logs-toolbar select,
+.logs-toolbar input[type="search"] {
+  background: var(--panel); color: var(--text);
+  border: 1px solid var(--border); border-radius: 6px;
+  padding: 5px 8px; font-size: 13px;
+}
+.logs-toolbar input[type="search"] { min-width: 180px; }
+.logs-list {
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: 8px;
-  overflow: hidden;
-}
-.log-panel summary {
-  padding: 10px 16px;
-  cursor: pointer;
-  font-size: 13px;
-  color: var(--muted);
-  user-select: none;
-}
-.log-panel summary:hover { color: var(--text); }
-.log-entries {
-  max-height: 300px;
-  overflow-y: auto;
-  padding: 0 16px 12px;
+  max-height: 70vh; overflow-y: auto;
+  padding: 6px 0;
   font-family: "SF Mono", "Menlo", monospace;
-  font-size: 11px;
-  line-height: 1.6;
+  font-size: 12px; line-height: 1.6;
 }
-.log-line { white-space: nowrap; }
-.log-ts { color: var(--muted); margin-right: 8px; }
-.log-msg { color: var(--text); }
+.logs-empty { padding: 16px; color: var(--muted); font-size: 13px; }
+.logs-footer { margin-top: 10px; }
+.logs-footer button[disabled] { opacity: 0.5; cursor: default; }
+.log-line { padding: 1px 14px; }
+.log-head {
+  display: flex; gap: 10px; align-items: baseline;
+  white-space: nowrap;
+}
+.log-head.has-exc { cursor: pointer; }
+.log-head.has-exc::before { content: "▸"; color: var(--muted); }
+.log-line.open .log-head.has-exc::before { content: "▾"; }
+.log-ts { color: var(--muted); flex: 0 0 auto; }
+.log-level { flex: 0 0 70px; font-weight: 600; }
+.log-logger { color: var(--muted); flex: 0 0 auto; }
+.log-msg {
+  color: var(--text); flex: 1 1 auto;
+  overflow: hidden; text-overflow: ellipsis;
+}
+.log-line.log-info    .log-level { color: var(--muted); }
+.log-line.log-warning .log-level { color: var(--warn); }
+.log-line.log-error   .log-level,
+.log-line.log-critical .log-level { color: var(--err-text); }
+.log-exc {
+  display: none;
+  margin: 4px 0 8px 14px; padding: 8px 12px;
+  background: var(--bg); border-left: 2px solid var(--border);
+  white-space: pre-wrap; color: var(--muted);
+}
+.log-line.open .log-exc { display: block; }
 
 /* Settings */
 .settings-layout {
@@ -990,7 +1167,7 @@ main {
 .settings-pane .hint {
   font-size: 12px;
   color: var(--muted);
-  margin: 6px 0 0;
+  margin: 6px 0 1.5rem;
   max-width: 60ch;
   line-height: 1.55;
 }
@@ -1164,6 +1341,8 @@ main {
 /* === <= 1024px : small laptops, tablet landscape === */
 @media (max-width: 1024px) {
   main { padding: 20px 16px; }
+  /* Keep the header content inset matching main's reduced padding. */
+  #app header .header-inner { padding-left: 16px; padding-right: 16px; }
   .journey-map { height: 420px; }
   #map { height: 280px; }
 }
@@ -1175,14 +1354,14 @@ main {
   /* Header reorders: brand + actions on row 1, nav on its own row.
    * The spacer (which was eating 1900px on desktop) is dropped, and
    * nav links stretch so the two tabs are equal-weight thumb targets. */
-  #app header {
+  #app header .header-inner {
     flex-wrap: wrap;
     gap: 8px 10px;
     padding: 10px 14px;
     padding-left: max(14px, env(safe-area-inset-left));
     padding-right: max(14px, env(safe-area-inset-right));
   }
-  #app header > .spacer { display: none; }
+  #app header .header-inner > .spacer { display: none; }
   #app header h1 { flex: 0 1 auto; margin-right: auto; }
   #app header nav {
     order: 10;
@@ -1308,6 +1487,13 @@ main {
     -webkit-overflow-scrolling: touch;
     width: 100%;
   }
+  .queue-hour-body { padding: 4px 0 8px 8px; }
+  .queue-hour-body table.queue-items {
+    display: block;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    width: 100%;
+  }
   .exports-table-wrap,
   .exports-panel { overflow-x: auto; }
   .exports-table { min-width: 520px; }
@@ -1316,7 +1502,9 @@ main {
    * crowding the row. */
   .queue-day-header { flex-wrap: wrap; }
   .queue-day-header h3 { flex: 1 1 auto; }
-  .queue-day-header .state-breakdown {
+  .queue-hour-header { flex-wrap: wrap; }
+  .queue-hour-header .hour-label { flex: 1 1 auto; }
+  .state-breakdown {
     flex: 1 1 100%;
     justify-content: flex-start;
     margin-top: 4px;
@@ -1359,7 +1547,7 @@ main {
 @media (max-width: 480px) {
   main { padding: 12px 10px; }
 
-  #app header { padding: 8px 10px; }
+  #app header .header-inner { padding: 8px 10px; }
   #app header h1 { font-size: 16px; }
 
   /* The "Dashcam offline / online" pill drops its label and
@@ -1374,8 +1562,10 @@ main {
     background: var(--muted);
     border: none;
   }
-  .status.offline { background: var(--err); }
-  .status.online { background: var(--ok); }
+  .status.downloading { background: var(--ok); }
+  .status.waiting     { background: var(--warn); }
+  .status.paused      { background: var(--err); }
+  .status.error       { background: #7f1d1d; }
 
   .day-header h3 { font-size: 14px; }
   .day-header .meta { font-size: 11px; }
@@ -1461,6 +1651,10 @@ main {
     animation: none;
     box-shadow: 0 0 0 1px var(--err);
   }
+  #sync-toggle.error #sync-icon-warning {
+    animation: none;
+    opacity: 0.9;
+  }
   .clip-pair.flash { animation: none; }
   .exports-panel.just-submitted { animation: none; }
   .skip-link { transition: none; }
@@ -1470,3 +1664,237 @@ main {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* ============================================================
+ * MQTT settings panel
+ * ============================================================ */
+#mqtt-panel { margin-top: 1rem; }
+#mqtt-panel .mqtt-grid { display: grid; grid-template-columns: 1fr 1fr; gap: .25rem; }
+#mqtt-panel .pw-wrap { display: flex; gap: .25rem; }
+#mqtt-panel .pw-wrap input { flex: 1; }
+#mqtt-status { display: flex; align-items: center; gap: .5rem; margin: .8rem 0; }
+#mqtt-status .dot { width: .7rem; height: .7rem; border-radius: 50%; display: inline-block; flex-shrink: 0; }
+#mqtt-status .dot.green  { background: var(--ok); }
+#mqtt-status .dot.amber  { background: var(--warn); }
+#mqtt-status .dot.red    { background: var(--err); }
+#mqtt-status .dot.grey   { background: var(--muted); }
+.mqtt-actions { display: flex; gap: .5rem; flex-wrap: wrap; margin-top: .5rem; }
+.mqtt-actions .primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent);
+  font-weight: 600;
+}
+
+/* ============================================================
+ * Storage usage card (Settings → Archive Retention)
+ * ============================================================ */
+.storage-usage {
+  margin: 0.5rem 0 1.25rem;
+  padding: 0.75rem 0.9rem;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.storage-usage-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+.storage-usage-label {
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+.storage-usage-value {
+  font-variant-numeric: tabular-nums;
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+.storage-usage-bar {
+  position: relative;
+  height: 8px;
+  background: var(--panel-3);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.storage-usage-fill {
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.4s ease, background 0.3s ease;
+}
+.storage-usage-fill.over-threshold {
+  background: var(--err);
+}
+.storage-usage-threshold {
+  position: absolute;
+  top: -2px;
+  bottom: -2px;
+  width: 2px;
+  background: var(--warn);
+  pointer-events: auto;
+}
+.storage-usage-mode {
+  margin: 0.5rem 0 0;
+}
+
+/* ---- Import recordings modal ---- */
+#import-modal {
+  position: fixed; inset: 0; z-index: 1500;
+  display: flex; align-items: center; justify-content: center; padding: 24px;
+  background: oklch(0.10 0.008 250 / 0.62);
+  -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px);
+  animation: import-fade 160ms ease;
+}
+#import-modal.hidden { display: none; }
+@keyframes import-fade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes import-rise {
+  from { opacity: 0; transform: translateY(10px) scale(0.985); }
+  to   { opacity: 1; transform: none; }
+}
+
+#import-modal .modal-card {
+  width: min(520px, 100%); max-height: 88vh; overflow: auto;
+  background: var(--panel); color: var(--text);
+  border: 1px solid var(--border); border-radius: 14px;
+  box-shadow: 0 24px 60px oklch(0 0 0 / 0.55);
+  padding: 22px 24px 24px;
+  animation: import-rise 220ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+#import-modal .modal-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding-bottom: 14px; margin-bottom: 16px;
+  border-bottom: 1px solid var(--border);
+}
+#import-modal .modal-head h2 {
+  margin: 0; font-size: 1.15rem; letter-spacing: -0.01em;
+}
+#import-modal .modal-x {
+  display: flex; align-items: center; justify-content: center;
+  width: 32px; height: 32px; padding: 0; flex-shrink: 0;
+  border: 0; border-radius: 8px; background: transparent; color: var(--muted);
+  transition: background 140ms ease, color 140ms ease;
+}
+#import-modal .modal-x:hover { background: var(--panel-3); color: var(--text); }
+
+/* Tabs — underline, muted until active */
+#import-modal .tabs {
+  display: flex; gap: 4px; margin: 0 0 18px; border-bottom: 1px solid var(--border);
+}
+#import-modal .import-tab {
+  padding: 8px 14px; margin-bottom: -1px;
+  border: 0; background: transparent; cursor: pointer;
+  color: var(--muted); font-size: 0.92rem; font-weight: 500;
+  border-bottom: 2px solid transparent;
+  transition: color 140ms ease, border-color 140ms ease;
+}
+#import-modal .import-tab:hover { color: var(--text); }
+#import-modal .import-tab.active { color: var(--text); border-bottom-color: var(--accent); }
+
+#import-modal .tab-pane.hidden { display: none; }
+#import-modal .pane-lead {
+  margin: 0 0 14px; color: var(--muted); font-size: 0.9rem; line-height: 1.5;
+}
+#import-modal code {
+  font-family: "SF Mono", "Menlo", monospace; font-size: 0.85em;
+  background: var(--panel-2); border: 1px solid var(--border);
+  border-radius: 4px; padding: 1px 5px;
+}
+
+/* Upload dropzone (native input visually hidden, label is the target) */
+#import-modal #import-files {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+#import-modal .dropzone {
+  display: flex; flex-direction: column; align-items: center; gap: 8px;
+  text-align: center; padding: 30px 20px;
+  border: 1.5px dashed var(--border-hover); border-radius: 12px;
+  background: var(--panel-2); cursor: pointer;
+  transition: border-color 160ms ease, background 160ms ease;
+}
+#import-modal .dropzone:hover { border-color: var(--accent); background: var(--accent-08); }
+#import-modal #import-files:focus-visible + .dropzone {
+  border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-35);
+}
+#import-modal .dropzone.has-files {
+  border-style: solid; border-color: var(--accent); background: var(--accent-08);
+}
+#import-modal .dropzone.dragging {
+  border-style: solid; border-color: var(--accent); background: var(--accent-18);
+}
+#import-modal .dropzone-icon { color: var(--accent); }
+#import-modal .dropzone-title { font-weight: 600; font-size: 0.98rem; }
+#import-modal .dropzone-hint { color: var(--muted); font-size: 0.82rem; line-height: 1.45; }
+
+/* Folder path row */
+#import-modal .field-row { display: flex; gap: 8px; align-items: stretch; }
+#import-modal .field-row input { flex: 1; }
+#import-modal #import-folder-path {
+  font-family: "SF Mono", "Menlo", monospace; font-size: 0.85rem;
+}
+
+/* Manifest line */
+#import-modal .manifest {
+  margin: 14px 0 0; font-size: 0.88rem; color: var(--muted);
+  max-height: 30vh; overflow: auto;
+}
+#import-modal .manifest:empty { margin: 0; }
+/* Breathing room above the pane's action button, regardless of whether
+   the manifest line is populated (it collapses when empty). */
+#import-modal .tab-pane > .btn { margin-top: 20px; }
+
+/* Buttons (scoped to the modal) */
+#import-modal .btn {
+  padding: 9px 16px; border-radius: 8px;
+  border: 1px solid var(--border); background: var(--panel-2); color: var(--text);
+  font-weight: 500; font-size: 0.92rem; cursor: pointer;
+  transition: background 140ms ease, border-color 140ms ease, filter 140ms ease;
+}
+#import-modal .btn:hover { background: var(--panel-3); border-color: var(--border-hover); }
+#import-modal .btn.primary {
+  background: var(--accent); border-color: var(--accent); color: var(--on-accent);
+  font-weight: 600;
+}
+#import-modal .btn.primary:hover { filter: brightness(1.07); }
+#import-modal .btn:disabled { opacity: 0.45; cursor: not-allowed; filter: none; }
+#import-modal .btn.hidden { display: none; }
+
+/* Progress */
+#import-modal .progress { margin-top: 18px; }
+#import-modal .progress.hidden { display: none; }
+#import-modal .progress .bar {
+  height: 8px; background: var(--panel-2); border: 1px solid var(--border);
+  border-radius: 999px; overflow: hidden;
+}
+#import-modal .progress .bar span {
+  display: block; height: 100%; width: 0; border-radius: 999px;
+  background: linear-gradient(90deg, var(--accent-85), var(--accent));
+  transition: width 220ms ease;
+}
+#import-modal #import-status {
+  margin: 10px 0 0; font-size: 0.85rem; color: var(--muted);
+  font-family: "SF Mono", "Menlo", monospace;
+}
+
+/* Summary card */
+#import-modal .summary {
+  margin-top: 18px; padding: 14px 16px;
+  background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px;
+  font-size: 0.9rem; line-height: 1.6; color: var(--text);
+}
+#import-modal .summary.hidden { display: none; }
+
+/* "Import recordings" launcher in the Download-manager header */
+.import-launch {
+  margin-left: auto; align-self: center;
+  display: inline-flex; align-items: center; gap: 7px;
+  padding: 7px 14px; border-radius: 8px;
+  background: var(--accent-08); border: 1px solid var(--accent-35); color: var(--accent);
+  font-weight: 600; font-size: 0.9rem; cursor: pointer;
+  transition: background 140ms ease, border-color 140ms ease;
+}
+.import-launch:hover { background: var(--accent-18); border-color: var(--accent); }
+.import-launch svg { flex-shrink: 0; }

@@ -28,6 +28,7 @@ from ._gpx import (
     parse_moov,
 )
 from ._protocol import (
+    DownloadCancelled,
     download_file,
     get_dashcam_filenames,
     get_dashcam_filenames_html,
@@ -97,6 +98,7 @@ def delete_dashcam_file(
 
 
 __all__ = [
+    "DownloadCancelled",
     "Recording",
     "ProgressSink",
     "delete_dashcam_file",

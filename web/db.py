@@ -144,7 +144,9 @@ CREATE TABLE IF NOT EXISTS export_jobs (
     error         TEXT,
     created_at    INTEGER NOT NULL,
     started_at    INTEGER,
-    finished_at   INTEGER
+    finished_at   INTEGER,
+    clip_start    INTEGER,            -- min source-clip timestamp (unix s)
+    clip_end      INTEGER             -- max source-clip timestamp (unix s)
 );
 
 CREATE TABLE IF NOT EXISTS kv (
@@ -159,6 +161,17 @@ CREATE TABLE IF NOT EXISTS geocode_cache (
     fetched_at  INTEGER NOT NULL,
     PRIMARY KEY (lat_key, lon_key)
 );
+
+CREATE TABLE IF NOT EXISTS app_log (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts        REAL    NOT NULL,   -- record.created (unix seconds, fractional)
+    levelno   INTEGER NOT NULL,   -- 10/20/30/40/50; "WARNING+" = levelno >= 30
+    level     TEXT    NOT NULL,   -- 'INFO','WARNING','ERROR',...
+    logger    TEXT    NOT NULL,   -- record.name, e.g. 'viofosync.sync_worker'
+    message   TEXT    NOT NULL,   -- record.getMessage()
+    exc_text  TEXT                -- formatted traceback, NULL when none
+);
+CREATE INDEX IF NOT EXISTS idx_app_log_levelno ON app_log(levelno, id DESC);
 """
 
 
@@ -214,6 +227,12 @@ class Database:
             "UPDATE clip_index SET gps_examined = 1 "
             "WHERE has_gpx = 1 AND gps_examined = 0"
         )
+
+        # Date range of an export's source clips, snapshotted at
+        # enqueue time so the export list can show it after the
+        # underlying clips are retention-pruned.
+        _add_column("export_jobs", "clip_start", "INTEGER")
+        _add_column("export_jobs", "clip_end", "INTEGER")
 
     @contextmanager
     def conn(self) -> Iterator[sqlite3.Connection]:

@@ -374,6 +374,7 @@ async def rescan(request: Request) -> JSONResponse:
     n = await asyncio.to_thread(
         scanner.scan,
         request.app.state.db, s.recordings, s.grouping,
+        request.app.state.hub, asyncio.get_running_loop(),
     )
     asyncio.create_task(
         scanner.sweep_missing_thumbs(

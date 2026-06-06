@@ -8,12 +8,13 @@ Self-hosted web app for syncing, browsing, and exporting recordings from a Viofo
 
 ## Features
 
-- **Archive browser** — view clips grouped by day, front/rear pairs, on-demand thumbnails, in-browser playback, kind filters (Driving / Parking / Read-only), GPS-maps toggle for low-bandwidth browsing.
-- **GPS journeys** — Leaflet + OSM map per trip, automatic stop detection splits a day into journeys, reverse-geocoded start/end labels (e.g. *Whitegate → Sandiway*).
-- **Exports** — select clip pairs, render joined front-only, rear-only, or picture-in-picture videos with ffmpeg. Hardware H.264 (videotoolbox / nvenc / qsv / vaapi) when available, software libx264 fallback.
-- **Download manager** — live progress, reorderable queue, reachability badge, transient timeouts re-queue instead of burning retries.
-- **Auto-delete from dashcam** *(optional)* — clears each clip from the device once it's downloaded and verified.
-- **Settings page** — runtime settings hot-reload rather than Docker env vars; only `WEB_HOST`/`WEB_PORT` need a restart.
+- **Archive browser** — clips grouped by day, paired front/rear, in-browser playback.
+- **GPS journeys** — clickable map per trip with auto-split stops and reverse-geocoded place names.
+- **Exports** — original clips, joined front/rear or picture-in-picture videos via ffmpeg.
+- **Download manager** — live progress with session speed and ETA, a reorderable queue.
+- **Auto-delete from dashcam** *(optional)* — frees SD card space once a clip is safely downloaded.
+- **Settings page** — runtime settings hot-reload; no Docker env vars to fiddle with.
+- **Home Assistant support** — auto-discovered sensors and buttons via MQTT.
 
 ## Hardware
 
@@ -48,14 +49,71 @@ After setup, every other setting lives on the **Settings** page in the UI.
 
 The only Docker-level env vars are:
 
-
 | Variable        | Description                                      | Default      |
 | --------------- | ------------------------------------------------ | ------------ |
 | `PUID` / `PGID` | Owner of `/config` and `/recordings` on the host | host UID/GID |
 | `TZ`            | Timezone for log timestamps                      | UTC          |
 
-
 App-level settings (sync interval, dashcam IP, encoder, geocoding email, web port, retention, password, auto-delete, etc.) are editable on the **Settings** page. Advanced users can hand-edit `/config/config.json` between restarts; the schema lives in `[web/settings_schema.py](web/settings_schema.py)`.
+
+### Importing without Wi-Fi
+
+Use **Import manually** in the web UI to ingest clips you already have on disk. Two modes:
+
+- **Upload** — pick a folder in your browser; clips upload one at a time and slot straight into the archive. On a quota-bound archive it makes room as it goes, evicting the oldest clips (never anything newer than what you're importing).
+- **Folder** — copy clips into the `import` folder inside your recordings share, then **Scan** → **Ingest**. By default this is `recordings/import`; for a one-off import from a different path, type it in the Import dialog's Folder tab, or set a persistent default via the advanced `IMPORT_PATH` key in `/config/config.json`.
+
+**From a USB drive / card reader:** bind-mount it into the container and set the import path to the mount, e.g.:
+
+```bash
+docker run ... -v /mnt/usb:/import robxyz/viofosync
+# then type /import in the Import dialog, or set IMPORT_PATH=/import in /config/config.json
+```
+
+The source is only ever **read** — originals on the card/USB are never deleted. If you plug the drive in *after* the container starts, either restart the container or use shared mount propagation (`-v /mnt:/mnt:rshared`, with the host mount also shared) so the container sees it.
+
+Imported clips are recognised by Viofo naming (`YYYY_MMDD_HHMMSS_NNNN[event][cam].MP4`); locked clips under an `RO/` folder keep their protected status. Non-matching files are left untouched.
+
+## Alternative camera address
+
+You can set an optional **Alternative address** (Settings → Dashcam) — a second IP/host for the **same** dashcam. It is **not** for a second camera.
+
+This is for reaching one camera at more than one address depending on where the car is, for example:
+
+- A Raspberry Pi running a VPN hotspot, so you can reach the dashcam remotely when the car is away from home.
+- A site-to-site VPN to a second location the car is regularly parked at, where the camera sits on a different subnet/IP.
+
+The alternative uses the same form as the primary (IP or hostname, plain `http`, port 80).
+
+## Home Assistant via MQTT
+
+viofosync can publish state and accept actions over MQTT, with full Home Assistant auto-discovery.
+
+Enable on the Settings page → MQTT. You'll need:
+
+- A reachable MQTT broker (Mosquitto, HA's built-in broker, EMQX, etc.).
+- Broker host + port. Optional username, password, and TLS.
+- A `Node ID` (default `viofosync`) — used as the topic prefix and as the `node_id` slot in HA discovery topics. Letters, digits, and `_` only. Set a distinct value per instance if you run more than one.
+
+When MQTT is on, viofosync publishes:
+
+- **Discovery configs** under `homeassistant/{component}/{node_id}/{object_id}/config` (retained) so HA picks them up immediately.
+- **State** under `{node_id}/{object_id}/state` (retained, event-driven, no idle traffic).
+- **Availability** to `{node_id}/availability` (`online` / `offline`), with LWT so HA marks every entity Unavailable within ~45s of an unclean disconnect.
+
+### Sensors and buttons
+
+Enabled by default in HA: dashcam connectivity, dashcam connection (`primary` / `alternative` / `offline`, with the live address as an `address` attribute), sync status (`downloading` / `waiting` / `paused` / `error`), queue pending, last downloaded clip, disk used, and six action buttons (start/pause/skip/refresh/retry-failed/rescan).
+
+Disabled-by-default (still created — enable per-entity in HA): queue failed, queue downloading, current filename, current progress, total clips.
+
+### Parameterised command
+
+For "prioritize the last N hours", publish to `{node_id}/cmd/prioritize_recent` with payload `{"hours": 0.5}` (HA's `mqtt.publish` service works). `hours` must be in (0, 168].
+
+### Security notes
+
+- The MQTT password is stored in `config.json` in plaintext, alongside the bcrypt hash of the admin password and the session secret. The same access controls already apply to that file.
 
 ## Reverse geocoding
 
@@ -87,6 +145,10 @@ CONFIG_DIR=/path/to/config RECORDINGS=/path/to/archive \
 
 `web.launcher` reads `WEB_HOST` / `WEB_PORT` from `config.json` (defaults `0.0.0.0:8080`) and re-execs into uvicorn. On first run, browse to `http://localhost:8080/setup`. `ffmpeg` must be on `$PATH` for thumbnails and exports.
 
+## AI Code
+
+This opensource project uses AI generated code and is intended for personal home use. It is not recommended that the server is exposed to the public internet.
+
 ## Credits
 
 The GPX extraction logic uses the method described at [https://sergei.nz/extracting-gps-data-from-viofo-a119-and-other-novatek-powered-cameras/](https://sergei.nz/extracting-gps-data-from-viofo-a119-and-other-novatek-powered-cameras/).
@@ -95,4 +157,4 @@ This software is unaffiliated with Viofo or any other vendor.
 
 ## License
 
-MIT — see [COPYING](COPYING).
+MIT — see [LICENSE](LICENSE).

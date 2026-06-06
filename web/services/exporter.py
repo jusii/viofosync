@@ -6,12 +6,13 @@ out to ffmpeg, and parses ``-progress pipe:1`` output so the
 frontend can show a progress bar via the same WebSocket the
 downloader uses.
 
-Three job types:
+Job types:
   * ``join_front`` — concat demuxer on front clips only
   * ``join_rear``  — same for rear
   * ``pip``        — picture-in-picture: front fullscreen +
-                     rear scaled to 25% in the bottom-right.
-                     Requires paired clips.
+                     rear inset. Requires paired clips.
+  * ``pip_rear``   — picture-in-picture with rear fullscreen +
+                     front inset. Requires paired clips.
 
 Outputs land in ``$RECORDINGS/.exports/{job_id}.mp4`` and are
 served by the archive router via a standard ``FileResponse``.
@@ -185,18 +186,27 @@ _PIP_OVERLAY_COORDS = {
 }
 
 
-def _pip_filter_complex(position: str) -> str:
+def _pip_filter_complex(position: str, main: str = "front") -> str:
     """Build the -filter_complex argument for the PiP overlay.
 
-    Front camera is input 0 (the fullscreen base layer), rear is
-    input 1 (scaled down to 1/4 size and overlaid). Unknown
+    ffmpeg input 0 is the front clip, input 1 is the rear clip.
+    ``main`` chooses which is the fullscreen base layer; the other
+    is scaled to 1/4 size and overlaid. ``main="front"`` (default)
+    reproduces the original front-fullscreen behaviour. Unknown
     ``position`` values fall back to ``top_right`` so a typo
     doesn't break ffmpeg invocation entirely.
     """
     coords = _PIP_OVERLAY_COORDS.get(
         position, _PIP_OVERLAY_COORDS["top_right"],
     )
-    return f"[1:v]scale=iw/4:ih/4[pip];[0:v][pip]overlay={coords}"
+    # Only "front" / "rear" are ever passed (derived from the job
+    # type); anything else falls through to rear-main rather than
+    # erroring, matching the lenient position handling above.
+    base, inset = ("0", "1") if main == "front" else ("1", "0")
+    return (
+        f"[{inset}:v]scale=iw/4:ih/4[pip];"
+        f"[{base}:v][pip]overlay={coords}"
+    )
 
 
 def video_codec_args(encoder: str) -> List[str]:
@@ -253,7 +263,7 @@ class ExportWorker:
     ) -> int:
         if not ffmpeg_available():
             raise RuntimeError("ffmpeg not installed on this host")
-        if job_type not in ("join_front", "join_rear", "pip"):
+        if job_type not in ("join_front", "join_rear", "pip", "pip_rear"):
             raise ValueError(f"unknown job type: {job_type}")
         if not clip_ids:
             raise ValueError("no clips selected")
@@ -266,13 +276,23 @@ class ExportWorker:
             "encoder": encoder,
         })
         with self.db.write() as c:
+            # Snapshot the footage date range now — the source clips
+            # may be retention-pruned long before the export is.
+            ph = ",".join("?" * len(clip_ids))
+            rng = c.execute(
+                f"SELECT MIN(timestamp) AS lo, MAX(timestamp) AS hi "
+                f"FROM clip_index WHERE id IN ({ph})",
+                clip_ids,
+            ).fetchone()
             cur = c.execute(
                 """
                 INSERT INTO export_jobs
-                    (type, clip_ids, state, created_at)
-                VALUES (?, ?, 'queued', ?)
+                    (type, clip_ids, state, created_at,
+                     clip_start, clip_end)
+                VALUES (?, ?, 'queued', ?, ?, ?)
                 """,
-                (job_type, payload, int(time.time())),
+                (job_type, payload, int(time.time()),
+                 rng["lo"], rng["hi"]),
             )
             return cur.lastrowid
 
@@ -396,7 +416,7 @@ class ExportWorker:
                 )
                 return
             await self._concat(job["id"], selected, out)
-        else:  # pip
+        else:  # pip / pip_rear
             pairs = self._pair_clips(clips)
             if not pairs:
                 self._finish(
@@ -404,8 +424,10 @@ class ExportWorker:
                     "no front+rear pairs in selection", None,
                 )
                 return
+            main = "rear" if job["type"] == "pip_rear" else "front"
             await self._pip(
-                job["id"], pairs, out, encoder, snap.pip_position,
+                job["id"], pairs, out, encoder,
+                snap.pip_position, main=main,
             )
 
     # ---- ffmpeg invocations ----
@@ -438,8 +460,13 @@ class ExportWorker:
         ) as f:
             list_file = f.name
             for c in clips:
-                # Escape single quotes per ffmpeg concat docs.
-                safe = c["path"].replace("'", "'\\''")
+                # Absolute path: ffmpeg's concat demuxer resolves
+                # relative entries against the list file's own
+                # directory (the temp dir), not our CWD — so a
+                # relative clip path (dev boxes with a relative
+                # RECORDINGS) would send ffmpeg looking in /tmp.
+                # Escape single quotes per the ffmpeg concat docs.
+                safe = os.path.abspath(c["path"]).replace("'", "'\\''")
                 f.write(f"file '{safe}'\n")
 
         try:
@@ -471,6 +498,7 @@ class ExportWorker:
         self, job_id: int, pairs, out: str,
         encoder: str = "software",
         position: str = "top_right",
+        main: str = "front",
     ) -> None:
         """One ffmpeg per pair into a temp dir, then concat.
 
@@ -480,12 +508,14 @@ class ExportWorker:
         tmp = tempfile.mkdtemp(prefix="vfs_pip_")
         parts: List[str] = []
         total_segments = len(pairs)
-        filter_complex = _pip_filter_complex(position)
+        filter_complex = _pip_filter_complex(position, main=main)
         try:
             for i, (_, p) in enumerate(pairs):
                 # Probe this segment's duration so the inner
                 # pump() can emit fine-grained progress instead
-                # of sitting silent for minutes.
+                # of sitting silent for minutes. Front and rear of a
+                # Viofo pair share a duration, so the front clip is a
+                # fine reference even for rear-main (pip_rear).
                 seg_dur = await self._probe_total(
                     [p["front"]]
                 )

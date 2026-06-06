@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import logging
 import os
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 
 from fastapi import FastAPI
 from fastapi.responses import FileResponse, Response
@@ -29,7 +29,11 @@ from .routers import exports as exports_router
 from .routers import progress as progress_router
 from .routers import queue as queue_router
 from .routers import settings as settings_router
+from .routers import mqtt as mqtt_router
 from .routers import setup as setup_router
+from .routers import storage as storage_router
+from .routers import imports as imports_router
+from .routers import logs as logs_router
 from .services import retention as _ret_mod
 from .services import scanner
 from .services.exporter import (
@@ -38,7 +42,10 @@ from .services.exporter import (
     probe_encoders,
 )
 from .services.geocode import GeocodeService
+from .services.download_session import DownloadSession
 from .services.hub import Hub
+from .services.log_store import DBLogHandler
+from .services.mqtt import MqttService
 from .services.sync_worker import SyncWorker
 from .setup_mode import SetupModeMiddleware
 
@@ -103,8 +110,10 @@ async def lifespan(app: FastAPI):
     async def _background_scan() -> None:
         try:
             log.info("initial archive scan: starting (%s)", s.recordings)
+            loop = asyncio.get_running_loop()
             n = await asyncio.to_thread(
                 scanner.scan, app.state.db, s.recordings, s.grouping,
+                app.state.hub, loop,
             )
             log.info("initial archive scan: %d clips indexed", n)
         except Exception as e:  # pragma: no cover — non-fatal
@@ -130,13 +139,40 @@ async def lifespan(app: FastAPI):
                 max_days=s.retention_max_days,
                 disk_pct=s.retention_disk_pct,
                 protect_ro=s.retention_protect_ro,
+                quota_gb=s.recordings_quota_gb,
             )
         except Exception:  # pragma: no cover — non-fatal
             log.exception("startup retention sweep failed")
 
     app.state.retention_task = asyncio.create_task(_background_retention())
 
-    app.state.hub = Hub()
+    app.state.download_session = DownloadSession(
+        remaining_bytes_provider=lambda: _q_mod.pending_bytes(app.state.db),
+    )
+    app.state.hub = Hub(
+        settings_provider=provider,
+        session=app.state.download_session,
+    )
+    # Now that db + hub + loop exist, let the log handler persist and
+    # live-broadcast records. Records logged earlier in startup were
+    # buffered by the handler and flush when the drain task starts.
+    log_handler = getattr(app.state, "log_handler", None)
+    if log_handler is not None:
+        log_handler.bind(
+            app.state.db,
+            app.state.hub.broadcast,
+            asyncio.get_running_loop(),
+        )
+        app.state.log_drain_task = asyncio.create_task(log_handler.run())
+    # Compute initial sync_status so the very first WebSocket snapshot
+    # and the first MQTT publish carry the right value without waiting
+    # for the sync worker's first cycle.
+    from web.services.sync_status import compute_sync_status as _csss
+    try:
+        _state, _ = _csss(app.state.hub, None, provider.get())
+        app.state.hub.last_state["sync_status"] = _state
+    except Exception:
+        log.exception("initial sync_status compute failed")
     app.state.geocode = GeocodeService(app.state.db, provider)
     app.state.export_worker = ExportWorker(
         app.state.db, provider, app.state.hub.broadcast
@@ -170,16 +206,51 @@ async def lifespan(app: FastAPI):
             "ADDRESS not set — sync worker idle until configured"
         )
 
+    app.state.mqtt = MqttService(
+        db=app.state.db,
+        provider=provider,
+        hub=app.state.hub,
+        app=app,
+    )
+    if s.mqtt_enabled and s.mqtt_host:
+        app.state.mqtt.start()
+
+    # Track current discovery/node so on_settings_changed can publish
+    # cleanup deletes against the *old* topology when those change.
+    app.state.mqtt._last_node_id = s.mqtt_node_id
+    app.state.mqtt._last_discovery_prefix = s.mqtt_discovery_prefix
+
+    def _on_mqtt_settings_change(keys, snap):
+        # Scheduled on the running loop so async work executes safely.
+        asyncio.create_task(app.state.mqtt.on_settings_changed(keys, snap))
+
+    provider.subscribe(_on_mqtt_settings_change)
+
     try:
         yield
     finally:
         log.info("viofosync web UI shutting down")
+        mqtt_svc = getattr(app.state, "mqtt", None)
+        if mqtt_svc is not None:
+            await mqtt_svc.stop()
         for attr in ("initial_scan_task", "retention_task"):
             task = getattr(app.state, attr, None)
             if task is not None and not task.done():
                 task.cancel()
         await app.state.sync_worker.stop()
         await app.state.export_worker.stop()
+        drain = getattr(app.state, "log_drain_task", None)
+        if drain is not None and not drain.done():
+            drain.cancel()
+            # Await the cancellation so the task unwinds before the loop
+            # tears down — bare cancel() only stays warning-clean while
+            # run() happens to be parked in queue.get(); awaiting it makes
+            # that independent of where cancellation lands.
+            with suppress(asyncio.CancelledError):
+                await drain
+        log_handler = getattr(app.state, "log_handler", None)
+        if log_handler is not None:
+            logging.getLogger().removeHandler(log_handler)
 
 
 def create_app() -> FastAPI:
@@ -194,11 +265,20 @@ def create_app() -> FastAPI:
 
     app = FastAPI(
         title="Viofosync",
-        version="0.1",
+        version="2.2",
         lifespan=lifespan,
         docs_url=None,       # no swagger in prod build
         redoc_url=None,
     )
+
+    # Persist INFO+ from our loggers (and WARNING+ from everything) into
+    # the app_log table for the Logs tab. The handler only enqueues here;
+    # lifespan binds the DB/hub/loop and starts the drain task. basicConfig
+    # above ran with force=True, so any handler from a previous create_app
+    # (in tests) was already removed — no accumulation.
+    log_handler = DBLogHandler()
+    logging.getLogger().addHandler(log_handler)
+    app.state.log_handler = log_handler
 
     app.add_middleware(SetupModeMiddleware)
 
@@ -209,6 +289,10 @@ def create_app() -> FastAPI:
     app.include_router(progress_router.router)
     app.include_router(settings_router.router)
     app.include_router(setup_router.router)
+    app.include_router(mqtt_router.router)
+    app.include_router(storage_router.router)
+    app.include_router(imports_router.router)
+    app.include_router(logs_router.router)
 
     # Static SPA — served at / with an explicit index.html fall-through
     # so the SPA's hash-router owns everything that isn't /api/*.

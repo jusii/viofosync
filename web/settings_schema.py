@@ -11,7 +11,7 @@ import re
 import secrets
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 GROUPING_OPTIONS = ("none", "daily", "weekly", "monthly", "yearly")
 ENCODER_OPTIONS = ("auto", "software", "videotoolbox", "nvenc", "qsv", "vaapi")
@@ -19,6 +19,7 @@ ENCODER_OPTIONS = ("auto", "software", "videotoolbox", "nvenc", "qsv", "vaapi")
 # Valid hostname per RFC 1123 (relaxed) or IPv4/IPv6.
 _HOSTNAME_RE = re.compile(r"^(?=.{1,253}$)([a-zA-Z0-9][a-zA-Z0-9-]{0,62})(\.[a-zA-Z0-9][a-zA-Z0-9-]{0,62})*$")
 _IPV4_RE = re.compile(r"^(?:\d{1,3}\.){3}\d{1,3}$")
+_MQTT_NODE_ID_RE = re.compile(r"^[a-z0-9_]{1,32}$")
 
 
 class SettingsModel(BaseModel):
@@ -27,6 +28,8 @@ class SettingsModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     ADDRESS: str | None = None
+    ADDRESS_FALLBACK: str | None = None
+    IMPORT_PATH: str = ""
     WEB_PASSWORD_HASH: str = ""
     SESSION_SECRET: str = Field(default_factory=lambda: secrets.token_hex(32))
 
@@ -43,6 +46,16 @@ class SettingsModel(BaseModel):
     RETENTION_MAX_DAYS: int = Field(default=0, ge=0, le=3650)
     RETENTION_DISK_PCT: int = Field(default=0, ge=0, le=99)
     RETENTION_PROTECT_RO: bool = True
+    # When > 0, RETENTION_DISK_PCT is measured against this declared
+    # quota (in GiB) instead of the filesystem reported by os.statvfs.
+    # Needed when the recordings directory lives inside a quota-bound
+    # share (Synology shared folder, ZFS dataset quota, etc.) where the
+    # OS-level "free space" doesn't reflect the actual constraint.
+    RECORDINGS_QUOTA_GB: int = Field(default=0, ge=0, le=1_048_576)
+    # When sync sees disk usage >= this percentage, status flips to
+    # "error" with reason "disk N% full". Must be >= RETENTION_DISK_PCT
+    # so retention gets a chance to clean before we flag a critical state.
+    DISK_CRITICAL_PCT: int = Field(default=95, ge=0, le=100)
 
     WEB_HOST: str = "0.0.0.0"
     WEB_PORT: int = Field(default=8080, ge=1, le=65535)
@@ -57,7 +70,24 @@ class SettingsModel(BaseModel):
     GEOCODE_ENABLED: bool = True
     DISTANCE_UNITS: Literal["km", "miles"] = "km"
 
-    @field_validator("ADDRESS")
+    MQTT_ENABLED: bool = False
+    MQTT_HOST: str = ""
+    MQTT_PORT: int = Field(default=1883, ge=1, le=65535)
+    MQTT_USERNAME: str = ""
+    MQTT_PASSWORD: str = ""
+    MQTT_TLS: bool = False
+    MQTT_CLIENT_ID: str = ""
+    MQTT_DISCOVERY_PREFIX: str = "homeassistant"
+    MQTT_NODE_ID: str = "viofosync"
+    MQTT_DISCOVERY_ENABLED: bool = True
+    MQTT_QOS: Literal[0, 1, 2] = 1
+
+    @field_validator("IMPORT_PATH")
+    @classmethod
+    def _validate_import_path(cls, v: str) -> str:
+        return v.strip()
+
+    @field_validator("ADDRESS", "ADDRESS_FALLBACK")
     @classmethod
     def _validate_address(cls, v: str | None) -> str | None:
         if v is None or v == "":
@@ -76,17 +106,68 @@ class SettingsModel(BaseModel):
             raise ValueError("not a valid email address")
         return v
 
+    @field_validator("MQTT_HOST")
+    @classmethod
+    def _validate_mqtt_host(cls, v: str) -> str:
+        if not v:
+            return ""
+        v = v.strip()
+        if _IPV4_RE.match(v) or _HOSTNAME_RE.match(v) or ":" in v:
+            return v
+        raise ValueError(f"not a valid MQTT host: {v!r}")
+
+    @field_validator("MQTT_NODE_ID")
+    @classmethod
+    def _validate_mqtt_node_id(cls, v: str) -> str:
+        if not _MQTT_NODE_ID_RE.match(v):
+            raise ValueError(
+                "MQTT_NODE_ID must match [a-z0-9_]{1,32}"
+            )
+        return v
+
+    @field_validator("MQTT_DISCOVERY_PREFIX")
+    @classmethod
+    def _validate_mqtt_discovery_prefix(cls, v: str) -> str:
+        if not v:
+            raise ValueError("MQTT_DISCOVERY_PREFIX must not be empty")
+        if v.startswith("/") or v.endswith("/"):
+            raise ValueError(
+                "MQTT_DISCOVERY_PREFIX must not start/end with '/'"
+            )
+        return v
+
+    @model_validator(mode="after")
+    def _validate_mqtt_cross_field(self):
+        if self.MQTT_ENABLED and not self.MQTT_HOST:
+            raise ValueError("MQTT_HOST is required when MQTT_ENABLED is True")
+        return self
+
+    @model_validator(mode="after")
+    def _validate_disk_critical(self):
+        # Allow 0 (disabled) regardless. Otherwise must be >= retention pct.
+        if self.DISK_CRITICAL_PCT != 0 and self.RETENTION_DISK_PCT > self.DISK_CRITICAL_PCT:
+            raise ValueError(
+                f"DISK_CRITICAL_PCT ({self.DISK_CRITICAL_PCT}) must be "
+                f">= RETENTION_DISK_PCT ({self.RETENTION_DISK_PCT})"
+            )
+        return self
+
 
 # Public taxonomy used by the API + UI.
 EDITABLE_KEYS = {
-    "ADDRESS", "GROUPING", "HTML", "GPS_EXTRACT", "DELETE_AFTER_DOWNLOAD",
+    "ADDRESS", "ADDRESS_FALLBACK", "IMPORT_PATH", "GROUPING", "HTML", "GPS_EXTRACT",
+    "DELETE_AFTER_DOWNLOAD",
     "TIMEOUT", "DOWNLOAD_ATTEMPTS", "MAX_DOWNLOAD_ATTEMPTS", "SYNC_INTERVAL",
     "ENABLE_SCHEDULED_SYNC", "WEB_HOST", "WEB_PORT", "EXPORT_ENCODER",
     "NOMINATIM_EMAIL", "GEOCODE_ENABLED",
     "SYNC_RO_ONLY", "RETENTION_MAX_DAYS", "RETENTION_DISK_PCT",
-    "RETENTION_PROTECT_RO",
+    "RETENTION_PROTECT_RO", "RECORDINGS_QUOTA_GB", "DISK_CRITICAL_PCT",
     "DISTANCE_UNITS",
     "PIP_POSITION",
+    "MQTT_ENABLED", "MQTT_HOST", "MQTT_PORT", "MQTT_USERNAME",
+    "MQTT_PASSWORD", "MQTT_TLS", "MQTT_CLIENT_ID",
+    "MQTT_DISCOVERY_PREFIX", "MQTT_NODE_ID",
+    "MQTT_DISCOVERY_ENABLED", "MQTT_QOS",
 }
 RESTART_REQUIRED_KEYS = {"WEB_HOST", "WEB_PORT"}
 READONLY_KEYS = {"PUID", "PGID", "TZ", "RECORDINGS"}

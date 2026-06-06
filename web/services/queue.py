@@ -290,6 +290,25 @@ def mark_transient_failure(
     return new_state
 
 
+def mark_cancelled(db: Database, item_id: int) -> None:
+    """Return a deliberately-interrupted download (user pause/stop, or
+    lost reachability) to ``pending`` without counting it as a failed
+    attempt.
+
+    ``mark_downloading`` bumps ``attempts`` on pickup; hand that
+    increment back so a pause can't silently exhaust the retry budget.
+    Mirrors ``reconcile_orphan_downloads`` — an interrupted download is
+    not a failed one.
+    """
+    with db.write() as c:
+        c.execute(
+            "UPDATE download_queue SET state='pending', "
+            "started_at=NULL, attempts=MAX(attempts-1, 0), "
+            "last_error=NULL WHERE id=?",
+            (item_id,),
+        )
+
+
 def list_all(db: Database, limit: int = 500) -> List[dict]:
     with db.conn() as c:
         rows = c.execute(
@@ -565,6 +584,21 @@ def list_day_items(
     return [dict(r) for r in rows]
 
 
+def pending_bytes(db: Database) -> int:
+    """Total ``remote_size`` across all rows in state ``pending``.
+
+    Feeds the session ETA. HTML-listing rows are MB-rounded, which is
+    fine for an estimate; rows are corrected to byte-exact sizes after
+    each download.
+    """
+    with db.conn() as c:
+        row = c.execute(
+            "SELECT COALESCE(SUM(remote_size), 0) AS n "
+            "FROM download_queue WHERE state='pending'"
+        ).fetchone()
+    return int(row["n"])
+
+
 def prioritize_recent_hours(db: Database, hours: float) -> int:
     """Bump all pending items recorded in the last ``hours``
     hours to the top of the queue. Returns the count updated."""
@@ -618,3 +652,40 @@ def retry(db: Database, filenames: List[str]) -> int:
             filenames,
         )
         return cur.rowcount
+
+
+def retry_failed(db: Database) -> int:
+    """Move every queue item in state ``failed`` back to ``pending``,
+    resetting attempts. Returns the count updated."""
+    with db.write() as c:
+        cur = c.execute(
+            "UPDATE download_queue SET state='pending', "
+            "attempts=0, last_error=NULL WHERE state='failed'"
+        )
+        return cur.rowcount
+
+
+def emit_queue_changed(db: Database, hub, *, loop=None) -> None:
+    """Broadcast queue_changed; ``loop`` required when calling from
+    a non-loop thread (sync_worker download thread)."""
+    if hub is None:
+        return
+    with db.conn() as c:
+        rows = c.execute(
+            "SELECT state, COUNT(*) AS n FROM download_queue "
+            "WHERE state IN ('pending','downloading','failed') "
+            "GROUP BY state"
+        ).fetchall()
+    counts = {"pending": 0, "downloading": 0, "failed": 0}
+    for r in rows:
+        counts[r["state"]] = r["n"]
+    event = {"type": "queue_changed", **counts}
+    import asyncio as _asyncio
+    try:
+        running = _asyncio.get_running_loop()
+        running.create_task(hub.broadcast(event))
+        return
+    except RuntimeError:
+        pass
+    if loop is not None:
+        hub.schedule_broadcast(loop, event)

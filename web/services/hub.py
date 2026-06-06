@@ -22,19 +22,44 @@ from typing import Any, Dict, Set
 from fastapi import WebSocket
 from starlette.websockets import WebSocketDisconnect
 
+from .sync_status import compute_sync_status
+
 log = logging.getLogger("viofosync.hub")
 
 
 class Hub:
-    def __init__(self) -> None:
+    def __init__(self, settings_provider: Any = None, session: Any = None) -> None:
         self._clients: Set[WebSocket] = set()
         self._lock = asyncio.Lock()
+        self._settings_provider = settings_provider
+        self._session = session
+        # Last broadcast session_stats key, for deduping the follow-up.
+        self._last_session_key: Any = None
         # Retain the last snapshot of major state so a newly-
         # connected client sees the current situation without
         # waiting for the next event.
         self.last_state: Dict[str, Any] = {
             "dashcam_online": None,
+            "dashcam_source": None,
+            "dashcam_address": None,
             "current_item": None,
+            # Session-wide download stats (see download_session.py). Always
+            # present so the WS snapshot and MQTT state_fn never KeyError.
+            "session": {
+                "active": False, "avg_speed_bps": None, "eta_seconds": None,
+                "session_bytes": 0, "elapsed_s": 0.0,
+            },
+            # Stateful diagnostics consumed by compute_sync_status():
+            "sync_error": None,
+            "disk_pct": None,
+            # Latest computed status + reason. Stored on the hub so
+            # the WebSocket snapshot (and any consumer reading
+            # last_state) sees a coherent pair without waiting for the
+            # next change event. ``sync_status_reason`` is the
+            # human-readable error reason — non-null only when status
+            # is "error".
+            "sync_status": None,
+            "sync_status_reason": None,
         }
 
     async def connect(self, ws: WebSocket) -> None:
@@ -67,6 +92,8 @@ class Hub:
         t = event.get("type")
         if t == "dashcam_online":
             self.last_state["dashcam_online"] = True
+            self.last_state["dashcam_source"] = event.get("source")
+            self.last_state["dashcam_address"] = event.get("address")
         elif t == "dashcam_offline":
             self.last_state["dashcam_online"] = False
         elif t == "item_started":
@@ -91,8 +118,26 @@ class Hub:
                 "running": event.get("running"),
                 "paused": event.get("paused"),
             }
+        elif t == "sync_error":
+            # kind=None is the clear signal. Anything else replaces the
+            # current error verbatim — last writer wins.
+            kind = event.get("kind")
+            if kind is None:
+                self.last_state["sync_error"] = None
+            else:
+                self.last_state["sync_error"] = {
+                    "kind": kind,
+                    "message": event.get("message"),
+                }
+        elif t == "disk_pct":
+            pct = event.get("pct")
+            if isinstance(pct, (int, float)):
+                self.last_state["disk_pct"] = float(pct)
 
-        dead = []
+        # Feed the session tracker (reads the event; mutates the tracker).
+        self._feed_session(t, event)
+
+        dead: list = []
         async with self._lock:
             clients = list(self._clients)
         for ws in clients:
@@ -100,10 +145,114 @@ class Hub:
                 await ws.send_json(event)
             except Exception:
                 dead.append(ws)
+        # Recompute the unified status after the state mutation above.
+        await self._maybe_emit_sync_status(dead)
+        await self._maybe_emit_session_stats(dead)
         if dead:
             async with self._lock:
                 for ws in dead:
                     self._clients.discard(ws)
+
+    async def _maybe_emit_sync_status(self, dead: list) -> None:
+        """After last_state mutations, recompute the unified status. If
+        it differs from the cached value, store it and broadcast a
+        follow-up event. Called from broadcast(); ``dead`` is the same
+        list it accumulates so we drop disconnected clients in one pass.
+        """
+        if self._settings_provider is None:
+            return
+        try:
+            snap = self._settings_provider.get()
+            status, reason = compute_sync_status(self, None, snap)
+        except Exception:
+            log.exception("sync_status compute failed; skipping follow-up")
+            return
+        prev_status = self.last_state.get("sync_status")
+        prev_reason = self.last_state.get("sync_status_reason")
+        # Dedupe on the (status, reason) pair so a changing reason
+        # (e.g. disk % climbing while status stays "error") still
+        # reaches clients. Non-error states have reason=None so this
+        # collapses back to status-only deduping there.
+        if status == prev_status and reason == prev_reason:
+            return
+        self.last_state["sync_status"] = status
+        self.last_state["sync_status_reason"] = reason
+        event = {"type": "sync_status", "status": status, "reason": reason}
+        async with self._lock:
+            clients = list(self._clients)
+        for ws in clients:
+            try:
+                await ws.send_json(event)
+            except Exception:
+                dead.append(ws)
+
+    def _feed_session(self, t: str, event: Dict[str, Any]) -> None:
+        """Translate the relevant Hub events into DownloadSession calls.
+        Runs on the event loop, so the tracker needs no locking."""
+        s = self._session
+        if s is None:
+            return
+        try:
+            if t == "item_started":
+                s.note_started(event.get("filename"), event.get("total"))
+            elif t == "item_progress":
+                s.note_progress(
+                    event.get("filename"), event.get("bytes"),
+                    event.get("total"),
+                )
+            elif t == "item_finished":
+                s.note_finished(event.get("filename"), event.get("bytes"))
+            elif t == "sync_done":
+                s.note_idle()
+            elif t == "dashcam_offline":
+                s.note_idle()
+            elif t == "sync_state":
+                # running=True fires on every item pick — only idle the
+                # session on the stopped/paused variant.
+                if not event.get("running") or event.get("paused"):
+                    s.note_idle()
+            elif t in ("queue_reconciled", "queue_changed"):
+                s.refresh_remaining()
+        except Exception:
+            log.exception("session tracker feed failed for %s", t)
+
+    async def _maybe_emit_session_stats(self, dead: list) -> None:
+        """Store the latest session snapshot in last_state and broadcast a
+        session_stats follow-up when the rounded view changes. Mirrors
+        _maybe_emit_sync_status; ``dead`` accumulates disconnected clients."""
+        s = self._session
+        if s is None:
+            return
+        try:
+            snap = s.snapshot()
+        except Exception:
+            log.exception("session snapshot failed; skipping follow-up")
+            return
+        self.last_state["session"] = snap
+        # Dedupe on a rounded view so sub-noise jitter doesn't broadcast.
+        speed = snap.get("avg_speed_bps")
+        eta = snap.get("eta_seconds")
+        # Include whole-second elapsed so an active session emits a ~1/s
+        # heartbeat even when speed/eta are stable — this keeps the MQTT
+        # publisher triggered and the UI byte counter fresh. Idle sessions
+        # hold elapsed at 0.0, so they stay silent.
+        key = (
+            snap.get("active"),
+            None if speed is None else round(speed / (1024 * 1024), 1),
+            None if eta is None else round(eta),
+            round(snap.get("elapsed_s") or 0.0),
+        )
+        if key == self._last_session_key:
+            return
+        self._last_session_key = key
+        event = {"type": "session_stats", **snap}
+        async with self._lock:
+            clients = list(self._clients)
+        for ws in clients:
+            try:
+                await ws.send_json(event)
+            except Exception:
+                dead.append(ws)
 
     def schedule_broadcast(
         self,

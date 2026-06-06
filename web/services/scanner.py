@@ -115,7 +115,7 @@ def _iter_clips(
         )
 
 
-def scan(db: Database, destination: str, grouping: str) -> int:
+def scan(db: Database, destination: str, grouping: str, hub=None, loop=None) -> int:
     """Full rescan. Returns the number of rows written.
 
     The directory walk runs *without* the DB write lock so that a
@@ -124,6 +124,10 @@ def scan(db: Database, destination: str, grouping: str) -> int:
     single short write transaction.
 
     Idempotent: re-running only bumps ``scanned_at``.
+
+    When ``hub`` is provided a ``clip_indexed`` event is broadcast
+    after the write transaction commits. Pass ``loop`` when calling
+    from a non-async thread (e.g. via ``asyncio.to_thread``).
     """
     now = int(time.time())
 
@@ -195,6 +199,15 @@ def scan(db: Database, destination: str, grouping: str) -> int:
         except Exception:
             c.execute("ROLLBACK")
             raise
+
+    if hub is not None:
+        event = {"type": "clip_indexed", "total": len(seen_paths)}
+        try:
+            running = asyncio.get_running_loop()
+            running.create_task(hub.broadcast(event))
+        except RuntimeError:
+            if loop is not None:
+                hub.schedule_broadcast(loop, event)
 
     return len(seen_paths)
 

@@ -32,6 +32,8 @@ def _editable_values(snap) -> dict[str, Any]:
     """Project the snapshot into the env-style key map (UI's contract)."""
     return {
         "ADDRESS": snap.address or "",
+        "ADDRESS_FALLBACK": snap.address_fallback or "",
+        "IMPORT_PATH": snap.import_path,
         "GROUPING": snap.grouping,
         "HTML": snap.use_html_listing,
         "GPS_EXTRACT": snap.gps_extract,
@@ -40,6 +42,8 @@ def _editable_values(snap) -> dict[str, Any]:
         "RETENTION_MAX_DAYS": snap.retention_max_days,
         "RETENTION_DISK_PCT": snap.retention_disk_pct,
         "RETENTION_PROTECT_RO": snap.retention_protect_ro,
+        "RECORDINGS_QUOTA_GB": snap.recordings_quota_gb,
+        "DISK_CRITICAL_PCT": snap.disk_critical_pct,
         "TIMEOUT": int(snap.timeout),
         "DOWNLOAD_ATTEMPTS": snap.download_attempts,
         "MAX_DOWNLOAD_ATTEMPTS": snap.max_attempts,
@@ -52,6 +56,17 @@ def _editable_values(snap) -> dict[str, Any]:
         "NOMINATIM_EMAIL": snap.nominatim_email,
         "GEOCODE_ENABLED": snap.geocode_enabled,
         "DISTANCE_UNITS": snap.distance_units,
+        "MQTT_ENABLED": snap.mqtt_enabled,
+        "MQTT_HOST": snap.mqtt_host,
+        "MQTT_PORT": snap.mqtt_port,
+        "MQTT_USERNAME": snap.mqtt_username,
+        "MQTT_PASSWORD": snap.mqtt_password,
+        "MQTT_TLS": snap.mqtt_tls,
+        "MQTT_CLIENT_ID": snap.mqtt_client_id,
+        "MQTT_DISCOVERY_PREFIX": snap.mqtt_discovery_prefix,
+        "MQTT_NODE_ID": snap.mqtt_node_id,
+        "MQTT_DISCOVERY_ENABLED": snap.mqtt_discovery_enabled,
+        "MQTT_QOS": snap.mqtt_qos,
     }
 
 
