@@ -1,6 +1,14 @@
 from __future__ import annotations
 
+import asyncio
+import logging
+from contextlib import suppress
+
+import pytest
+
 from web.db import Database
+from web.services import log_store
+from web.services.log_store import DBLogHandler
 
 
 def test_app_log_table_created(tmp_path) -> None:
@@ -13,16 +21,6 @@ def test_app_log_table_created(tmp_path) -> None:
     assert cols == {
         "id", "ts", "levelno", "level", "logger", "message", "exc_text",
     }
-
-
-import asyncio
-import logging
-from contextlib import suppress
-
-import pytest
-
-from web.services import log_store
-from web.services.log_store import DBLogHandler
 
 
 def _record(name, level, msg, *, exc_info=None) -> logging.LogRecord:

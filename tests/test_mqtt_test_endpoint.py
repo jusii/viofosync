@@ -8,6 +8,7 @@ import pytest
 def logged_in_client(tmp_config_dir, tmp_recordings_dir, monkeypatch):
     import bcrypt
     from fastapi.testclient import TestClient
+
     from web import settings as settings_mod
     from web.app import create_app
     from web.services.sync_worker import SyncWorker
@@ -15,7 +16,8 @@ def logged_in_client(tmp_config_dir, tmp_recordings_dir, monkeypatch):
     digest = bcrypt.hashpw(b"pw" * 8, bcrypt.gensalt()).decode()
     settings_mod.reset_for_tests()
     p = settings_mod.get_provider()
-    data = p._store.load(); data["WEB_PASSWORD_HASH"] = digest
+    data = p._store.load()
+    data["WEB_PASSWORD_HASH"] = digest
     p._store.write(data)
     settings_mod.reset_for_tests()
     monkeypatch.setattr(SyncWorker, "start", lambda self: None)

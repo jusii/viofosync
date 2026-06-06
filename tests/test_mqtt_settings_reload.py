@@ -1,8 +1,6 @@
 """Tests for MqttService.on_settings_changed."""
 from __future__ import annotations
 
-import asyncio
-
 import pytest
 
 

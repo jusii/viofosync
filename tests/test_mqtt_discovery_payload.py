@@ -58,7 +58,8 @@ def test_unique_id_includes_node_id():
 
 def test_discovery_payload_for_sensor():
     from web.services.mqtt_topology import (
-        EntityDef, build_discovery_payload,
+        EntityDef,
+        build_discovery_payload,
     )
     entity = EntityDef(
         object_id="queue_pending",
@@ -92,7 +93,8 @@ def test_discovery_payload_for_sensor():
 
 def test_discovery_payload_for_button():
     from web.services.mqtt_topology import (
-        EntityDef, build_discovery_payload,
+        EntityDef,
+        build_discovery_payload,
     )
     async def _h(_p): ...
     entity = EntityDef(
@@ -120,7 +122,8 @@ def test_device_manifest_omits_empty_configuration_url():
     'invalid url for dictionary value' when configuration_url is
     present but empty. The builder must omit the key in that case."""
     from web.services.mqtt_topology import (
-        EntityDef, build_discovery_payload,
+        EntityDef,
+        build_discovery_payload,
     )
     entity = EntityDef(
         object_id="queue_pending", component="sensor",
@@ -142,7 +145,8 @@ def test_device_manifest_omits_empty_configuration_url():
 
 def test_discovery_payload_unit_when_set():
     from web.services.mqtt_topology import (
-        EntityDef, build_discovery_payload,
+        EntityDef,
+        build_discovery_payload,
     )
     entity = EntityDef(
         object_id="disk_used", component="sensor", name="Disk used",
@@ -158,7 +162,8 @@ def test_discovery_payload_unit_when_set():
 
 def test_discovery_payload_disabled_by_default():
     from web.services.mqtt_topology import (
-        EntityDef, build_discovery_payload,
+        EntityDef,
+        build_discovery_payload,
     )
     entity = EntityDef(
         object_id="queue_failed", component="sensor", name="Queue failed",
@@ -174,7 +179,9 @@ def test_discovery_payload_disabled_by_default():
 
 def test_discovery_payload_includes_json_attributes_topic_when_attrs_fn():
     from web.services.mqtt_topology import (
-        EntityDef, build_discovery_payload, build_attrs_topic,
+        EntityDef,
+        build_attrs_topic,
+        build_discovery_payload,
     )
 
     def _stub_state(hub, db, snap): return "x"
@@ -196,7 +203,8 @@ def test_discovery_payload_includes_json_attributes_topic_when_attrs_fn():
 
 def test_discovery_payload_omits_json_attributes_topic_without_attrs_fn():
     from web.services.mqtt_topology import (
-        EntityDef, build_discovery_payload,
+        EntityDef,
+        build_discovery_payload,
     )
 
     def _stub_state(hub, db, snap): return "x"

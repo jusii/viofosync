@@ -198,11 +198,13 @@ def test_disk_critical_pct_default_is_95():
 
 
 def test_disk_critical_pct_validates_range():
-    from web.settings_schema import SettingsModel
     import pytest as _pt
-    with _pt.raises(Exception):
+    from pydantic import ValidationError
+
+    from web.settings_schema import SettingsModel
+    with _pt.raises(ValidationError):
         SettingsModel(DISK_CRITICAL_PCT=101)
-    with _pt.raises(Exception):
+    with _pt.raises(ValidationError):
         SettingsModel(DISK_CRITICAL_PCT=-1)
     # Boundaries OK
     assert SettingsModel(DISK_CRITICAL_PCT=0).DISK_CRITICAL_PCT == 0
@@ -212,17 +214,20 @@ def test_disk_critical_pct_validates_range():
 def test_disk_critical_pct_must_exceed_retention_threshold():
     """A critical threshold below the retention threshold would fire before
     retention even tried — reject the combination at validation time."""
-    from web.settings_schema import SettingsModel
     import pytest as _pt
-    with _pt.raises(Exception):
+    from pydantic import ValidationError
+
+    from web.settings_schema import SettingsModel
+    with _pt.raises(ValidationError):
         SettingsModel(RETENTION_DISK_PCT=90, DISK_CRITICAL_PCT=80)
     # Equal is allowed (no overlap means no firing before retention)
     SettingsModel(RETENTION_DISK_PCT=90, DISK_CRITICAL_PCT=95)
 
 
 def test_snapshot_exposes_disk_critical_pct():
-    from web.settings import SettingsProvider
     import tempfile
+
+    from web.settings import SettingsProvider
     with tempfile.TemporaryDirectory() as d:
         sp = SettingsProvider(config_path=f"{d}/c.json",
                                env_file_path=f"{d}/v.env",
@@ -232,7 +237,9 @@ def test_snapshot_exposes_disk_critical_pct():
 
 def test_import_path_round_trips_and_defaults_empty():
     from web.settings_schema import (
-        DEFAULT_VALUES, EDITABLE_KEYS, validate_partial,
+        DEFAULT_VALUES,
+        EDITABLE_KEYS,
+        validate_partial,
     )
     # Editable + defaults to empty (meaning "<recordings>/import").
     assert "IMPORT_PATH" in EDITABLE_KEYS

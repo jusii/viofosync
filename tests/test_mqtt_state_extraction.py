@@ -5,8 +5,6 @@ from __future__ import annotations
 import time
 import types
 
-import pytest
-
 
 def _stub_snapshot(**kwargs):
     """Make a stub Snapshot. We don't need every field — the state
@@ -262,8 +260,8 @@ def test_state_disk_used_filesystem_only(tmp_path):
 def test_state_disk_used_reports_max_of_quota_and_filesystem(tmp_path):
     """Both rules active → publish the higher percentage (the rule
     closest to triggering cleanup)."""
-    from web.services.mqtt_state import state_disk_used
     from web.services import retention as _ret
+    from web.services.mqtt_state import state_disk_used
 
     _ret._size_cache.clear()
     # Plant exactly 600 MiB under recordings, then set a tiny 1 GiB quota.
@@ -283,8 +281,8 @@ def test_state_disk_used_reports_max_of_quota_and_filesystem(tmp_path):
 def test_state_disk_used_filesystem_wins_when_quota_far_from_full(tmp_path):
     """When the quota is generous and the filesystem is the tighter
     constraint, the FS % wins."""
-    from web.services.mqtt_state import state_disk_used
     from web.services import retention as _ret
+    from web.services.mqtt_state import state_disk_used
 
     _ret._size_cache.clear()
     # 1 MiB of data under recordings, 1024 GiB quota → 0% quota usage.

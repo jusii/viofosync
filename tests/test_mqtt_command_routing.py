@@ -1,7 +1,6 @@
 """Command handler factory + routing tests."""
 from __future__ import annotations
 
-import asyncio
 import types
 
 import pytest
@@ -67,6 +66,7 @@ async def test_refresh_queue_handler(tmp_path):
 @pytest.mark.asyncio
 async def test_retry_failed_handler(tmp_path):
     import time as _t
+
     from web.services.mqtt_topology import build_command_handlers
     app = _fake_app(tmp_path)
     with app.state.db.write() as c:
@@ -99,8 +99,9 @@ async def test_rescan_archive_handler(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_prioritize_recent_valid_payload(tmp_path):
-    import time as _t
     import json
+    import time as _t
+
     from web.services.mqtt_topology import build_command_handlers
     app = _fake_app(tmp_path)
     now = int(_t.time())
@@ -135,6 +136,7 @@ async def test_prioritize_recent_rejects_bad_json(tmp_path, caplog):
 @pytest.mark.asyncio
 async def test_prioritize_recent_rejects_out_of_range(tmp_path):
     import json
+
     from web.services.mqtt_topology import build_command_handlers
     app = _fake_app(tmp_path)
     await build_command_handlers(app)["prioritize_recent"](

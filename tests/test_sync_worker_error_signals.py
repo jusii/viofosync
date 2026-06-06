@@ -2,7 +2,6 @@
 prevent normal operation: recordings path unwritable, auth failures."""
 from __future__ import annotations
 
-import os
 import types
 
 from web.services.sync_worker import SyncWorker

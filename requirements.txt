@@ -1,4 +1,7 @@
 fastapi>=0.110
+# Pin below the starlette 1.x line: its TestClient deprecates httpx in favour
+# of the httpx2 fork, which breaks our test suite under filterwarnings=error.
+starlette<1.0
 uvicorn[standard]>=0.29
 bcrypt>=4.1
 itsdangerous>=2.2

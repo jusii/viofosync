@@ -10,7 +10,6 @@ import time
 
 import pytest
 
-
 # ---------------------------------------------------------------------------
 # Issue 1: emit_queue_changed
 # ---------------------------------------------------------------------------
@@ -81,7 +80,6 @@ def test_emit_queue_changed_uses_schedule_broadcast_from_thread(tmp_path):
     from web.services.queue import emit_queue_changed
 
     db = _make_db(tmp_path)
-    hub = _FakeHub()
 
     # Run emit_queue_changed from a plain thread context (no running loop).
     # We simulate this by calling it inside asyncio.run's shutdown gap;
@@ -114,8 +112,8 @@ def test_emit_queue_changed_uses_schedule_broadcast_from_thread(tmp_path):
 @pytest.mark.asyncio
 async def test_scan_emits_clip_indexed(tmp_path):
     """scanner.scan schedules clip_indexed after indexing (called from thread)."""
-    from web.services import scanner
     from web.db import Database
+    from web.services import scanner
 
     db = Database(str(tmp_path / "v.db"))
     hub = _FakeHub()
@@ -141,8 +139,8 @@ async def test_scan_emits_clip_indexed(tmp_path):
 @pytest.mark.asyncio
 async def test_scan_no_event_when_hub_none(tmp_path):
     """scanner.scan with hub=None doesn't crash and returns count normally."""
-    from web.services import scanner
     from web.db import Database
+    from web.services import scanner
 
     db = Database(str(tmp_path / "v.db"))
     n = await asyncio.to_thread(

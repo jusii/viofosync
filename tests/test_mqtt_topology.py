@@ -17,7 +17,8 @@ def test_topology_has_expected_entities():
 
 def test_unique_ids_unique_per_node():
     from web.services.mqtt_topology import (
-        TOPOLOGY, build_unique_id,
+        TOPOLOGY,
+        build_unique_id,
     )
     cfg = {"discovery_prefix": "homeassistant", "node_id": "viofosync",
            "version": "0.2.0"}
@@ -110,8 +111,8 @@ def test_sync_status_entity_lists_new_affected_events():
 
 
 def test_sync_status_entity_has_attrs_fn():
-    from web.services.mqtt_topology import TOPOLOGY
     from web.services.mqtt_state import attrs_sync_status
+    from web.services.mqtt_topology import TOPOLOGY
     entity = next(e for e in TOPOLOGY if e.object_id == "sync_status")
     assert entity.attrs_fn is attrs_sync_status
 
@@ -144,8 +145,8 @@ def test_download_speed_entity_present():
 
 
 def test_download_speed_entity_config():
-    from web.services.mqtt_topology import TOPOLOGY
     from web.services.mqtt_state import state_download_speed
+    from web.services.mqtt_topology import TOPOLOGY
     e = next(x for x in TOPOLOGY if x.object_id == "download_speed")
     assert e.component == "sensor"
     assert e.device_class == "data_rate"

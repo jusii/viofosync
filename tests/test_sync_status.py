@@ -7,8 +7,6 @@ from __future__ import annotations
 
 import types
 
-import pytest
-
 from web.services.sync_status import compute_sync_status
 
 

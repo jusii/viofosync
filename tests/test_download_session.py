@@ -156,6 +156,7 @@ def test_progress_without_started_starts_session():
 
 def test_lifespan_wires_download_session(tmp_config_dir, tmp_recordings_dir):
     from fastapi.testclient import TestClient
+
     from web import app as app_mod
     from web import settings as settings_mod
     settings_mod.reset_for_tests()

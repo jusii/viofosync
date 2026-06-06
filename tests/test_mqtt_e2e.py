@@ -5,7 +5,6 @@ import asyncio
 import json
 import threading
 
-
 import pytest
 
 
@@ -15,11 +14,11 @@ def test_full_walkthrough(mqtt_broker, tmp_path, monkeypatch):
     """Drive a real amqtt broker through discovery, state publish, and commands."""
     import aiomqtt
     import bcrypt
+    from fastapi.testclient import TestClient
 
     from web import settings as settings_mod
     from web.app import create_app
     from web.services.sync_worker import SyncWorker
-    from fastapi.testclient import TestClient
 
     host, port = mqtt_broker
 

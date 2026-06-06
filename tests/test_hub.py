@@ -1,6 +1,8 @@
 """Hub.connect handshake regressions."""
 from __future__ import annotations
 
+import types as _types
+
 from starlette.websockets import WebSocketDisconnect
 
 from web.services.hub import Hub
@@ -114,9 +116,6 @@ async def test_initial_last_state_includes_new_keys() -> None:
     assert hub.last_state["disk_pct"] is None
     assert hub.last_state["sync_status"] is None
     assert hub.last_state["sync_status_reason"] is None
-
-
-import types as _types
 
 
 def _stub_provider(**snap_overrides):

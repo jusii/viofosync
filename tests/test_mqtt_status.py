@@ -3,7 +3,7 @@ from __future__ import annotations
 
 
 def test_initial_status_idle():
-    from web.services.mqtt import MqttService, ConnState
+    from web.services.mqtt import ConnState, MqttService
     svc = MqttService(db=None, provider=None, hub=None, app=None)
     s = svc.get_status()
     assert s["state"] == ConnState.IDLE.value
@@ -11,7 +11,7 @@ def test_initial_status_idle():
 
 
 def test_status_after_marking_connected():
-    from web.services.mqtt import MqttService, ConnState
+    from web.services.mqtt import ConnState, MqttService
     svc = MqttService(db=None, provider=None, hub=None, app=None)
     svc._set_state(ConnState.CONNECTED, detail="broker:1883")
     s = svc.get_status()
@@ -20,7 +20,7 @@ def test_status_after_marking_connected():
 
 
 def test_status_after_marking_error():
-    from web.services.mqtt import MqttService, ConnState
+    from web.services.mqtt import ConnState, MqttService
     svc = MqttService(db=None, provider=None, hub=None, app=None)
     svc._set_state(ConnState.ERROR, detail="auth failed")
     s = svc.get_status()
@@ -32,6 +32,7 @@ def test_status_endpoint_requires_session(tmp_config_dir, tmp_recordings_dir,
                                             monkeypatch):
     import bcrypt
     from fastapi.testclient import TestClient
+
     from web import settings as settings_mod
     from web.app import create_app
     from web.services.sync_worker import SyncWorker
@@ -39,7 +40,8 @@ def test_status_endpoint_requires_session(tmp_config_dir, tmp_recordings_dir,
     digest = bcrypt.hashpw(b"pw" * 8, bcrypt.gensalt()).decode()
     settings_mod.reset_for_tests()
     p = settings_mod.get_provider()
-    data = p._store.load(); data["WEB_PASSWORD_HASH"] = digest
+    data = p._store.load()
+    data["WEB_PASSWORD_HASH"] = digest
     p._store.write(data)
     settings_mod.reset_for_tests()
     monkeypatch.setattr(SyncWorker, "start", lambda self: None)
@@ -55,6 +57,7 @@ def test_status_endpoint_returns_idle_when_disabled(
 ):
     import bcrypt
     from fastapi.testclient import TestClient
+
     from web import settings as settings_mod
     from web.app import create_app
     from web.services.sync_worker import SyncWorker
@@ -62,7 +65,8 @@ def test_status_endpoint_returns_idle_when_disabled(
     digest = bcrypt.hashpw(b"pw" * 8, bcrypt.gensalt()).decode()
     settings_mod.reset_for_tests()
     p = settings_mod.get_provider()
-    data = p._store.load(); data["WEB_PASSWORD_HASH"] = digest
+    data = p._store.load()
+    data["WEB_PASSWORD_HASH"] = digest
     p._store.write(data)
     settings_mod.reset_for_tests()
     monkeypatch.setattr(SyncWorker, "start", lambda self: None)

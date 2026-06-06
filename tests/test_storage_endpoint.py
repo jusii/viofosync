@@ -54,6 +54,7 @@ def test_usage_endpoint_requires_session(tmp_config_dir, tmp_recordings_dir,
                                           monkeypatch):
     import bcrypt
     from fastapi.testclient import TestClient
+
     from web import settings as settings_mod
     from web.app import create_app
     from web.services.sync_worker import SyncWorker
