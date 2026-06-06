@@ -1,92 +1,49 @@
 # Changelog
 
-## Unreleased
+## v2.2 — 2026-06-06
 
 ### Added
-- Manual import: bring Viofo clips into the archive without Wi-Fi sync,
-  via browser folder upload or a configurable folder/USB drop path
-  (`IMPORT_PATH`). Imported clips get the usual GPX, thumbnails, indexing,
-  RO/parking classification, and retention; quota imports make room as they
-  go without deleting anything newer than what's being imported. External
-  sources (USB/SD) are only ever read, never modified.
 
-## v2.2 — 2026-06-04
+#### Home Assistant MQTT Support
 
-### Added
-- Export downloads now use sensible filenames derived from the
-  selected clips' date range, camera, and clip count
-  (e.g. `2024-03-15_1430-1502_front_4clips.mp4`).
-- Download the original front/rear clips directly as individual
-  files, without joining.
-- New rear-main picture-in-picture export variant (rear fullscreen,
-  front inset) alongside the existing front-main one.
-- Optional **Alternative address** for the same camera (Settings →
-  Dashcam, setting `ADDRESS_FALLBACK`). The primary is always tried
-  first; the alternative is used only when the primary is unreachable,
-  and sync returns to the primary automatically. Intended for reaching
-  one dashcam over a VPN (e.g. a Raspberry Pi hotspot, or a site-to-site
-  VPN to a second parking location) — not for a second camera. A new
-  Home Assistant `dashcam_connection` sensor reports `primary` /
-  `alternative` / `offline` with the live address as an attribute, and
-  the web UI shows a "via alternative" chip while on the fallback.
-- MQTT publishing with Home Assistant auto-discovery. New Settings
-  panel exposes broker host/port/credentials, TLS, topic prefix, and
-  discovery prefix. Publishes 12 sensor/binary_sensor entities and 6
-  action buttons; idle traffic is zero thanks to per-topic change
-  detection and coalescing. LWT keeps HA's view consistent with
-  viofosync's actual state.
-- `sync_status` now reports `error` for sticky problems: missing
-  `ADDRESS` configuration, recordings path not writable, camera
-  authentication failure (HTTP 401/403), or disk usage at/above
-  `DISK_CRITICAL_PCT` (new setting, default 95%).
-- The HA `sync_status` sensor exposes a `reason` JSON attribute
-  populated when state is `error`. Surface it in Lovelace with
-  `state_attr('sensor.viofosync_sync_status', 'reason')`.
-- New `DISK_CRITICAL_PCT` setting (Snapshot field `disk_critical_pct`)
-  configures the disk-pressure threshold above which sync goes into
-  `error`. Must be `>= RETENTION_DISK_PCT`.
-- The download manager now shows a session-wide moving-average download
-  speed and an estimated time to complete while a sync is running.
-- New Home Assistant `download_speed` sensor (`data_rate`, MB/s) reports
-  the session moving average. To avoid flooding HA it publishes first at
-  ~30 s into a session then at most once per minute, and reports `0` when
-  idle. Enabled by default.
-- **Retry failed** button in the web UI download manager re-queues every
-  failed download in one click (mirrors the existing HA action button).
-- Live disk usage is shown in Settings → Archive Retention so you can
-  see headroom against the retention and critical thresholds.
-- Quota-bound retention via the new `RECORDINGS_QUOTA_GB` setting: when
-  set, `RETENTION_DISK_PCT` and `DISK_CRITICAL_PCT` are measured against
-  the declared quota instead of the filesystem reported by `statvfs`.
-  Needed when the recordings directory lives inside a quota-bound share
-  (Synology shared folder, ZFS dataset quota, etc.).
+Auto-discovered sensors and action buttons over MQTT, set up from a new Settings panel.
+
+#### Manual Import
+
+Add clips to the archive without Wi-Fi sync — by browser upload or a folder/USB drop path.
+
+#### Alternative Camera Address
+
+An optional second address for the same camera, used automatically when the primary is unreachable (e.g. reaching the dashcam over a mobile VPN).
+
+#### Quota-Bound Retention
+
+Measure retention and disk thresholds against a declared quota (`RECORDINGS_QUOTA_GB`), for recordings on a NAS share or ZFS dataset.
+
+#### Sync Error Reporting
+
+Sync now surfaces a sticky `error` state — missing config, unwritable path, camera auth failure, or disk full — in both the UI and Home Assistant.
+
+#### Download Manager Improvements
+
+Session speed and ETA while syncing, one-click retry of failed downloads, and live disk usage in Settings.
+
+#### Export Improvements
+
+Meaningful download filenames, direct download of the original front/rear clips, and a new rear-main picture-in-picture variant.
 
 ### Changed
-- Unified `sync_status` to four states: `downloading`, `waiting`,
-  `paused`, `error`. Replaces the previous `stopped` / `paused` /
-  `downloading` / `idle` vocabulary on the Home Assistant
-  `sensor.viofosync_sync_status` entity, and replaces the separate
-  "Dashcam online / offline" badge in the web UI with a single status
-  badge. If you have HA automations matching the previous strings,
-  update them: `idle` and `stopped` map to `waiting` (or `paused`
-  when sync is fully stopped). Connection state is still reflected
-  via the existing `binary_sensor.viofosync_dashcam`.
-- Redesigned the export jobs panel: the type is shown as a
-  human-readable badge (Join Front / Join Rear / PiP Fr / PiP Rf),
-  the State and Progress columns are merged into one Status cell with
-  an inline progress bar, and a new Footage column shows the source
-  clips' date range and clip count. Download and delete are now icon
-  buttons. (The ID and Created columns were dropped.)
-- The download list is now grouped by hour.
+
+- Sync status simplified to four states (`downloading` / `waiting` / `paused` / `error`); update any Home Assistant automations that matched the old `idle` / `stopped` strings.
+- Export jobs panel redesigned.
+- Downloads are now grouped by hour.
+- UI polish: header alignment, unified status colours, and minor label tidy-ups.
 
 ### Fixed
-- Archive retention caps (max age / max clips) are enforced on a
-  periodic loop rather than only after a download, so they apply even
-  when no new clips are arriving.
-- Join exports could fail with "No such file or directory" when clip
-  paths were stored relative (e.g. a dev box launched with a relative
-  `RECORDINGS`): ffmpeg's concat demuxer resolved them against its temp
-  directory. The concat list now uses absolute paths.
+
+- Archive retention caps now enforced on a periodic loop, not only after a download.
+- Join exports no longer fail when clip paths are stored relative.
+- Settings storage-usage card no longer renders near-invisible on the dark theme.
 
 ## v2.1 — 2026-05-16
 

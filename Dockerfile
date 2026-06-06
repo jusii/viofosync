@@ -32,7 +32,7 @@ RUN apk add --no-cache \
     esac && \
     useradd -UMr dashcam
 
-COPY COPYING /
+COPY LICENSE /
 COPY setuid.sh /setuid.sh
 COPY entrypoint.sh /entrypoint.sh
 
