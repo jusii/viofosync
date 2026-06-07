@@ -51,6 +51,29 @@ BACKOFF_STEPS = [10, 30, 120, 600]  # seconds
 RETENTION_INTERVAL_SECONDS = 300  # 5 minutes
 
 
+def _path_is_writable(path: str) -> bool:
+    """Return True if *path* is a directory we can actually write to.
+
+    We probe with a real create-and-delete rather than ``os.access(W_OK)``:
+    on NFS (and other networked filesystems) ``os.access`` checks the cached
+    owner/mode against the local UID and can report a perfectly writable
+    export as non-writable, while the real write is accepted by the server's
+    own permission mapping. A live probe is the only reliable test."""
+    if not (path and os.path.isdir(path)):
+        return False
+    probe = os.path.join(path, f".viofosync-writetest-{os.getpid()}")
+    try:
+        with open(probe, "w"):
+            pass
+    except OSError:
+        return False
+    try:
+        os.unlink(probe)
+    except OSError:
+        pass
+    return True
+
+
 def _filter_ro_only(listing):
     """Yield only Recordings whose dashcam source path lies under
     /RO/. Used when the user has 'Sync read-only files only' on."""
@@ -471,7 +494,7 @@ class SyncWorker:
         Emits a sticky sync_error on failure, clears one on recovery."""
         snap = self._provider.get()
         path = getattr(snap, "recordings", None) or ""
-        ok = bool(path) and os.path.isdir(path) and os.access(path, os.W_OK)
+        ok = _path_is_writable(path)
         if not ok:
             await self._set_sync_error(
                 "recordings_unwritable",

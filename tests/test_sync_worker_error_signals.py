@@ -48,6 +48,27 @@ async def test_check_recordings_writable_clears_previous_error(tmp_path):
     assert {"type": "sync_error", "kind": None, "message": None} in hub.events
 
 
+async def test_check_recordings_writable_uses_real_probe_not_os_access(
+    tmp_path, monkeypatch
+):
+    """Regression: os.access(W_OK) is unreliable on NFS — it checks cached
+    owner/mode against the local UID and can report a genuinely writable
+    export as non-writable. The check must probe with a real write instead."""
+    snap = types.SimpleNamespace(recordings=str(tmp_path))
+    hub = _RecordingHub()
+    sw = _make_worker(snap, hub)
+    # Simulate NFS: os.access lies and says "not writable" even though
+    # an actual create-and-delete in the directory succeeds.
+    monkeypatch.setattr(
+        "web.services.sync_worker.os.access", lambda *a, **k: False
+    )
+    ok = await sw._check_recordings_writable()
+    assert ok is True
+    assert hub.events == []
+    # The probe must leave nothing behind.
+    assert list(tmp_path.iterdir()) == []
+
+
 async def test_check_recordings_writable_does_not_emit_when_already_clear(tmp_path):
     snap = types.SimpleNamespace(recordings=str(tmp_path))
     hub = _RecordingHub()
