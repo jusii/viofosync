@@ -24,18 +24,27 @@ with a 503 so the UI can tell the user why.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
 import re
 import shutil
+import signal
 import subprocess
 import tempfile
 import time
 from typing import List, Optional
 
+
+class _ExportCancelled(Exception):
+    """Raised inside the worker when the running job is deleted/cancelled, so
+    _run_job unwinds — cleaning its temp dirs via its ``finally`` blocks —
+    without marking the (now-deleted) row as failed."""
+
 from ..db import Database
 from ..settings import SettingsProvider
+from .naming import channel_of
 
 log = logging.getLogger("viofosync.exporter")
 
@@ -49,6 +58,48 @@ def exports_dir(recordings: str) -> str:
     return d
 
 
+# Minimum trim length; sub-frame slivers from clamping are dropped.
+_MIN_PIECE_S = 0.05
+
+
+def build_switch_pieces(segments: list, clips: list) -> list:
+    """Turn a switched-export plan into an ordered list of trims.
+
+    ``segments`` is ``[{channel, start_ts, end_ts}, ...]`` (in output
+    order). ``clips`` is ``[{path, channel, start_ts, duration_s}, ...]``
+    (``channel`` already derived via ``naming.channel_of``). Returns
+    ``[{path, ss, t}, ...]`` — each piece trims ``path`` from offset
+    ``ss`` for duration ``t`` seconds. Clips are clamped to the segment
+    window; pieces shorter than ``_MIN_PIECE_S`` are dropped.
+    """
+    pieces: list = []
+    for seg in segments:
+        s, e, ch = seg["start_ts"], seg["end_ts"], seg["channel"]
+        seg_clips = sorted(
+            (
+                c for c in clips
+                if c["channel"] == ch
+                and c["start_ts"] < e
+                and c["start_ts"] + (c.get("duration_s") or 0) > s
+            ),
+            key=lambda c: c["start_ts"],
+        )
+        for c in seg_clips:
+            cs = c["start_ts"]
+            ce = cs + (c.get("duration_s") or 0)
+            in_ = max(s, cs) - cs
+            out_ = min(e, ce) - cs
+            if out_ - in_ >= _MIN_PIECE_S:
+                pieces.append({
+                    "path": c["path"],
+                    # float() so integer unix timestamps still yield
+                    # float offsets (consistent ffmpeg -ss/-t strings).
+                    "ss": round(float(in_), 3),
+                    "t": round(float(out_ - in_), 3),
+                })
+    return pieces
+
+
 def reconcile_orphan_jobs(db: Database) -> int:
     """Mark rows stuck at ``state='running'`` as failed.
 
@@ -59,12 +110,14 @@ def reconcile_orphan_jobs(db: Database) -> int:
     Returns the number of rows updated.
     """
     with db.write() as c:
+        # 'paused' jobs are a SIGSTOP'd ffmpeg child that the restart killed,
+        # so they can't resume either — reconcile them too.
         cur = c.execute(
             "UPDATE export_jobs "
             "SET state='failed', "
             "    error='interrupted by container restart', "
             "    finished_at=? "
-            "WHERE state='running'",
+            "WHERE state IN ('running', 'paused')",
             (int(time.time()),),
         )
         return cur.rowcount
@@ -115,16 +168,52 @@ def _test_encoder_sync(encoder: str) -> bool:
     the container — common on Synology where ``/dev/dri``
     isn't mapped through by default. The 1-frame test exercises
     the exact init path the real export uses, so anything that
-    survives this is genuinely usable."""
+    survives this is genuinely usable.
+
+    QSV takes a dedicated branch (its own device-init + scale_qsv command)
+    rather than the generic path below."""
     if encoder == "software":
         # libx264 ships with every ffmpeg build; the -encoders
         # presence check is enough.
         return True
+    if encoder == "qsv":
+        # Exercise the real QSV init path: device creation (the step that
+        # returned MFX session -9 on Alpine), a VPP filter, and the encoder.
+        # lavfi yields software frames, so we hwupload here; the real export
+        # uses -hwaccel qsv decode instead, a strictly easier init once the
+        # MFX session exists.
+        cmd = [
+            shutil.which("ffmpeg") or "ffmpeg",
+            "-hide_banner", "-loglevel", "error",
+            "-init_hw_device", "qsv=hw", "-filter_hw_device", "hw",
+            "-f", "lavfi",
+            "-i", "color=size=64x64:duration=0.1:rate=1",
+            # extra_hw_frames=16: a small surface pool for the upload — enough
+            # to satisfy the QSV VPP/encoder without reserving GPU memory.
+            "-vf", "format=nv12,hwupload=extra_hw_frames=16,scale_qsv=64:64",
+            "-c:v", "h264_qsv", "-global_quality", "23",
+            "-frames:v", "1",
+            "-f", "null", "-",
+        ]
+        try:
+            result = subprocess.run(cmd, capture_output=True, timeout=10)
+            return result.returncode == 0
+        except (subprocess.TimeoutExpired, OSError):
+            return False
+    # Exercise the REAL pipeline a filtered export uses: init the hw device
+    # and run a filter (here a no-op format/hwupload for vaapi) before the
+    # encoder. A bare encoder test passes for vaapi even though every real
+    # export fails, because ffmpeg auto-inserts the upload only when there's
+    # no explicit filter chain — a false positive we must not repeat.
+    upload = _hw_upload_filter(encoder)
+    vf = (["-vf", upload] if upload else [])
     cmd = [
         shutil.which("ffmpeg") or "ffmpeg",
         "-hide_banner", "-loglevel", "error",
+        *_hw_init_args(encoder),
         "-f", "lavfi",
         "-i", "color=size=64x64:duration=0.1:rate=1",
+        *vf,
         *video_codec_args(encoder),
         "-frames:v", "1",
         "-f", "null", "-",
@@ -186,7 +275,21 @@ _PIP_OVERLAY_COORDS = {
 }
 
 
-def _pip_filter_complex(position: str, main: str = "front") -> str:
+def _scale_filter(w: int, h: int, encoder: str) -> str:
+    """Full-frame scale filter in the right dialect for ``encoder``.
+
+    QSV runs the scaler on the GPU (``scale_qsv``) and omits ``setsar`` —
+    that filter can't operate on QSV surfaces and SAR is carried by the
+    encoder instead. Every other encoder uses the software ``scale`` plus
+    ``setsar=1`` (VAAPI then appends hwupload via :func:`_with_upload`)."""
+    if encoder == "qsv":
+        return f"scale_qsv=w={w}:h={h}"
+    return f"scale={w}:{h},setsar=1"
+
+
+def _pip_filter_complex(
+    position: str, main: str = "front", encoder: str = "software",
+) -> str:
     """Build the -filter_complex argument for the PiP overlay.
 
     ffmpeg input 0 is the front clip, input 1 is the rear clip.
@@ -203,6 +306,15 @@ def _pip_filter_complex(position: str, main: str = "front") -> str:
     # type); anything else falls through to rear-main rather than
     # erroring, matching the lenient position handling above.
     base, inset = ("0", "1") if main == "front" else ("1", "0")
+    if encoder == "qsv":
+        # GPU composition: scale_qsv shrinks the inset, overlay_qsv composes
+        # on the iGPU. overlay_qsv takes x=/y= (the legacy overlay's single
+        # "x:y" positional form isn't accepted), so split the coord pair.
+        x, y = coords.split(":")
+        return (
+            f"[{inset}:v]scale_qsv=w=iw/4:h=ih/4[pip];"
+            f"[{base}:v][pip]overlay_qsv=x={x}:y={y}"
+        )
     return (
         f"[{inset}:v]scale=iw/4:ih/4[pip];"
         f"[{base}:v][pip]overlay={coords}"
@@ -220,11 +332,73 @@ def video_codec_args(encoder: str) -> List[str]:
             "-c:v", "h264_nvenc", "-preset", "p5", "-cq", "23",
         ]
     if encoder == "qsv":
+        # ICQ (intelligent constant quality): -global_quality acts as the
+        # ICQ quality level when no bitrate is set — QSV's best quality-per-bit
+        # mode on Gen 9.5. look_ahead is disabled: Gen 9.5's LA is weak and
+        # only adds latency. QP 23 ≈ the VAAPI CQP 24 used above.
         return [
-            "-c:v", "h264_qsv", "-global_quality", "23",
+            "-c:v", "h264_qsv", "-global_quality", "23", "-look_ahead", "0",
         ]
+    if encoder == "vaapi":
+        # Constant-QP rate control; pairs with the format=nv12,hwupload the
+        # filter chain adds and the -vaapi_device global arg.
+        return ["-c:v", "h264_vaapi", "-rc_mode", "CQP", "-qp", "24"]
     # ``software`` (default / fallback) — widely compatible.
     return ["-c:v", "libx264", "-preset", "fast", "-crf", "23"]
+
+
+# The DRM render node VAAPI uploads/encodes through. Standard on a
+# single-iGPU NAS; setuid.sh already grants the app user access to it.
+VAAPI_RENDER_NODE = "/dev/dri/renderD128"
+
+
+def _hw_init_args(encoder: str) -> List[str]:
+    """Global ffmpeg args to initialise a hardware device for ``encoder``.
+
+    VAAPI needs an explicit render node bound before the inputs. The others
+    we support (videotoolbox, nvenc) derive their device implicitly, and
+    software needs nothing. QSV creates a shared "qsv=hw" device (used by
+    decode, the VPP filters via -filter_hw_device, and the encoder) so
+    frames stay on the GPU end to end.
+    """
+    if encoder == "qsv":
+        # One QSV device shared by decode, the VPP filters (scale_qsv/
+        # overlay_qsv via -filter_hw_device) and the encoder, so frames
+        # never leave the GPU.
+        return ["-init_hw_device", "qsv=hw", "-filter_hw_device", "hw"]
+    if encoder == "vaapi":
+        return ["-vaapi_device", VAAPI_RENDER_NODE]
+    return []
+
+
+def _hw_decode_args(encoder: str) -> List[str]:
+    """Per-input flags that decode on the GPU and keep frames there.
+
+    QSV exports run the whole chain on the iGPU: these go *before* each
+    ``-i`` so ffmpeg decodes into QSV surfaces that scale_qsv/overlay_qsv
+    and h264_qsv consume without a GPU->RAM round trip. Every other
+    encoder decodes on the CPU (VAAPI uploads later via hwupload), so they
+    get nothing here."""
+    if encoder == "qsv":
+        return ["-hwaccel", "qsv", "-hwaccel_output_format", "qsv"]
+    return []
+
+
+def _hw_upload_filter(encoder: str) -> str:
+    """Filter that moves software frames onto the GPU before a hardware
+    encoder that requires it. VAAPI does (``h264_vaapi`` only accepts VAAPI
+    surfaces); videotoolbox/nvenc accept software frames directly, so they
+    get ``""``. Append to the end of a ``-vf`` / ``-filter_complex`` chain."""
+    if encoder == "vaapi":
+        return "format=nv12,hwupload"
+    return ""
+
+
+def _with_upload(chain: str, encoder: str) -> str:
+    """Append the hardware-upload filter to ``chain`` when ``encoder`` needs
+    it, else return ``chain`` unchanged."""
+    up = _hw_upload_filter(encoder)
+    return f"{chain},{up}" if up else chain
 
 
 class ExportWorker:
@@ -239,6 +413,67 @@ class ExportWorker:
         self.broadcast = broadcast
         self._task: Optional[asyncio.Task] = None
         self._stop = asyncio.Event()
+        # Control of the one job running right now. Only the worker loop and
+        # the (same-event-loop) HTTP handlers touch these, so no locking.
+        self._current_job_id: Optional[int] = None
+        self._current_proc: Optional[asyncio.subprocess.Process] = None
+        self._cancel_current = False
+        self._paused = False
+        self._resume = asyncio.Event()
+        self._resume.set()   # not paused
+
+    def _set_state(self, job_id: int, state: str) -> None:
+        with self.db.write() as c:
+            c.execute(
+                "UPDATE export_jobs SET state=? WHERE id=?", (state, job_id)
+            )
+
+    async def pause(self, job_id: int) -> bool:
+        """Freeze the running job's encoder (SIGSTOP) and mark it paused.
+        Returns False if ``job_id`` isn't the job currently running."""
+        if job_id != self._current_job_id:
+            return False
+        self._paused = True
+        self._resume.clear()
+        if self._current_proc is not None:
+            with contextlib.suppress(Exception):
+                self._current_proc.send_signal(signal.SIGSTOP)
+        self._set_state(job_id, "paused")
+        await self.broadcast(
+            {"type": "export_state", "job_id": job_id, "state": "paused"}
+        )
+        return True
+
+    async def resume(self, job_id: int) -> bool:
+        """Resume a paused job (SIGCONT) and mark it running again."""
+        if job_id != self._current_job_id:
+            return False
+        self._paused = False
+        self._resume.set()
+        if self._current_proc is not None:
+            with contextlib.suppress(Exception):
+                self._current_proc.send_signal(signal.SIGCONT)
+        self._set_state(job_id, "running")
+        await self.broadcast(
+            {"type": "export_state", "job_id": job_id, "state": "running"}
+        )
+        return True
+
+    async def cancel(self, job_id: int) -> bool:
+        """Kill the running job's encoder so a delete-in-progress actually
+        stops the ffmpeg work. Returns False if ``job_id`` isn't running.
+        The worker unwinds via _ExportCancelled (no 'failed' row)."""
+        if job_id != self._current_job_id:
+            return False
+        self._cancel_current = True
+        self._paused = False
+        self._resume.set()   # unblock a paused job so it can unwind
+        if self._current_proc is not None:
+            with contextlib.suppress(Exception):
+                self._current_proc.send_signal(signal.SIGCONT)  # unfreeze first
+            with contextlib.suppress(Exception):
+                self._current_proc.kill()
+        return True
 
     def start(self) -> None:
         if self._task is None or self._task.done():
@@ -296,6 +531,31 @@ class ExportWorker:
             )
             return cur.lastrowid
 
+    def enqueue_switched(self, segments: list, encoder: str = "software") -> int:
+        if not ffmpeg_available():
+            raise RuntimeError("ffmpeg not installed on this host")
+        if not segments:
+            raise ValueError("no segments")
+        for s in segments:
+            if "channel" not in s or "start_ts" not in s or "end_ts" not in s:
+                raise ValueError("segment missing channel/start_ts/end_ts")
+            if not (s["end_ts"] > s["start_ts"]):
+                raise ValueError("segment end_ts must be after start_ts")
+
+        payload = json.dumps({"segments": segments, "encoder": encoder})
+        clip_start = int(min(s["start_ts"] for s in segments))
+        clip_end = int(max(s["end_ts"] for s in segments))
+        with self.db.write() as c:
+            cur = c.execute(
+                """
+                INSERT INTO export_jobs
+                    (type, clip_ids, state, created_at, clip_start, clip_end)
+                VALUES ('switched', ?, 'queued', ?, ?, ?)
+                """,
+                (payload, int(time.time()), clip_start, clip_end),
+            )
+            return cur.lastrowid
+
     # ---- Background loop ----
 
     async def _run(self) -> None:
@@ -309,11 +569,25 @@ class ExportWorker:
                 except asyncio.TimeoutError:
                     pass
                 continue
-            try:
-                await self._run_job(job)
-            except Exception as e:  # pragma: no cover
-                log.exception("export job %d failed", job["id"])
-                self._finish(job["id"], False, str(e), None)
+            await self._process(job)
+
+    async def _process(self, job: dict) -> None:
+        """Run one job, translating a cancellation (delete-in-progress) into
+        a clean discard and any real error into a 'failed' row. Always resets
+        the per-job control state afterwards."""
+        try:
+            await self._run_job(job)
+        except _ExportCancelled:
+            log.info("export job %d cancelled — discarded", job["id"])
+        except Exception as e:  # pragma: no cover
+            log.exception("export job %d failed", job["id"])
+            self._finish(job["id"], False, str(e), None)
+        finally:
+            self._current_job_id = None
+            self._current_proc = None
+            self._cancel_current = False
+            self._paused = False
+            self._resume.set()
 
     def _pop_next(self) -> Optional[dict]:
         with self.db.write() as c:
@@ -329,6 +603,11 @@ class ExportWorker:
                 "SET state='running', started_at=? WHERE id=?",
                 (int(time.time()), row["id"]),
             )
+            self._current_job_id = row["id"]
+            self._current_proc = None
+            self._cancel_current = False
+            self._paused = False
+            self._resume.set()
             return dict(row)
 
     def _finish(
@@ -396,10 +675,16 @@ class ExportWorker:
         else:
             clip_ids = raw.get("clip_ids", [])
             encoder = raw.get("encoder") or "software"
-        clips = self._fetch_clips(clip_ids)
         out = os.path.join(
             exports_dir(snap.recordings), f"{job['id']}.mp4"
         )
+
+        if job["type"] == "switched":
+            segments = raw.get("segments", []) if isinstance(raw, dict) else []
+            await self._run_switched(job, segments, encoder, out)
+            return
+
+        clips = self._fetch_clips(clip_ids)
 
         if job["type"] in ("join_front", "join_rear"):
             wanted = "F" if job["type"] == "join_front" else "R"
@@ -508,7 +793,7 @@ class ExportWorker:
         tmp = tempfile.mkdtemp(prefix="vfs_pip_")
         parts: List[str] = []
         total_segments = len(pairs)
-        filter_complex = _pip_filter_complex(position, main=main)
+        filter_complex = _pip_filter_complex(position, main=main, encoder=encoder)
         try:
             for i, (_, p) in enumerate(pairs):
                 # Probe this segment's duration so the inner
@@ -532,11 +817,18 @@ class ExportWorker:
                 rc, err = await self._run_ffmpeg(
                     job_id,
                     [
+                        *_hw_init_args(encoder),
                         "-y",
+                        # decode flags are per-input: repeated before each -i
+                        # so QSV decodes both clips straight onto the GPU.
+                        *_hw_decode_args(encoder),
                         "-i", p["front"]["path"],
+                        *_hw_decode_args(encoder),
                         "-i", p["rear"]["path"],
+                        # _with_upload appends hwupload for VAAPI only; for QSV
+                        # the filter already yields GPU surfaces, so it's a no-op.
                         "-filter_complex",
-                        filter_complex,
+                        _with_upload(filter_complex, encoder),
                         *video_codec_args(encoder),
                         "-c:a", "copy",
                         seg,
@@ -586,6 +878,101 @@ class ExportWorker:
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
+    async def _run_switched(self, job, segments, encoder, out) -> None:
+        lo = min(s["start_ts"] for s in segments)
+        hi = max(s["end_ts"] for s in segments)
+        with self.db.conn() as c:
+            rows = c.execute(
+                """
+                SELECT path, camera, timestamp, duration_s
+                FROM clip_index
+                WHERE timestamp < ?
+                  AND timestamp + COALESCE(duration_s, 0) > ?
+                """,
+                (hi, lo),
+            ).fetchall()
+        clips = [
+            {
+                "path": r["path"],
+                "channel": channel_of(r["camera"]),
+                "start_ts": r["timestamp"],
+                "duration_s": r["duration_s"],
+            }
+            for r in rows
+        ]
+        pieces = build_switch_pieces(segments, clips)
+        if not pieces:
+            self._finish(job["id"], False, "no footage in selection", None)
+            return
+
+        res = await self._probe_resolution(pieces[0]["path"])
+        w, h = res if res else (1920, 1080)
+        vf = _with_upload(_scale_filter(w, h, encoder), encoder)
+
+        tmp = tempfile.mkdtemp(prefix="vfs_switched_")
+        parts: List[str] = []
+        n = len(pieces)
+        try:
+            for i, pc in enumerate(pieces):
+                seg = os.path.join(tmp, f"seg_{i:04d}.mp4")
+                await self.broadcast({
+                    "type": "export_progress", "job_id": job["id"],
+                    "progress": i / max(1, n),
+                    "stage": f"segment {i + 1}/{n}",
+                })
+                rc, err = await self._run_ffmpeg(
+                    job["id"],
+                    [
+                        *_hw_init_args(encoder),
+                        *_hw_decode_args(encoder),
+                        "-y",
+                        "-ss", str(pc["ss"]),
+                        "-i", pc["path"],
+                        "-t", str(pc["t"]),
+                        "-vf", vf,
+                        *video_codec_args(encoder),
+                        "-c:a", "aac",
+                        seg,
+                    ],
+                    pc["t"],
+                    progress_base=i / max(1, n),
+                    progress_span=1.0 / max(1, n),
+                    stage=f"segment {i + 1}/{n}",
+                )
+                if rc != 0:
+                    self._finish(
+                        job["id"], False,
+                        f"segment {i + 1} failed (ffmpeg exit {rc}): {err}",
+                        None,
+                    )
+                    return
+                parts.append(seg)
+
+            await self.broadcast({
+                "type": "export_progress", "job_id": job["id"],
+                "progress": 0.98, "stage": "concatenating",
+            })
+            list_file = os.path.join(tmp, "parts.txt")
+            with open(list_file, "w") as f:
+                for p in parts:
+                    safe = os.path.abspath(p).replace("'", "'\\''")
+                    f.write(f"file '{safe}'\n")
+            rc, err = await self._run_ffmpeg(
+                job["id"],
+                ["-y", "-f", "concat", "-safe", "0",
+                 "-i", list_file, "-c", "copy", out],
+                None, stage="concatenating",
+            )
+            if rc == 0 and os.path.exists(out):
+                self._finish(job["id"], True, None, out)
+            else:
+                self._finish(
+                    job["id"], False,
+                    f"concat failed (ffmpeg exit {rc}): {err}", None,
+                )
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
     async def _probe_total(self, clips: List[dict]) -> Optional[float]:
         ffprobe = shutil.which("ffprobe")
         if ffprobe is None:
@@ -607,6 +994,25 @@ class ExportWorker:
             except ValueError:
                 return None
         return total
+
+    async def _probe_resolution(self, path: str):
+        """(width, height) of the first video stream, or None."""
+        ffprobe = shutil.which("ffprobe")
+        if ffprobe is None:
+            return None
+        proc = await asyncio.create_subprocess_exec(
+            ffprobe, "-v", "error", "-select_streams", "v:0",
+            "-show_entries", "stream=width,height",
+            "-of", "csv=s=x:p=0", path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        out, _ = await proc.communicate()
+        try:
+            w, h = out.decode().strip().split("x")
+            return int(w), int(h)
+        except ValueError:
+            return None
 
     async def _run_ffmpeg(
         self,
@@ -631,12 +1037,23 @@ class ExportWorker:
             "-progress", "pipe:1", "-nostats",
             *args,
         ]
+        # A delete may have landed between segments — bail before spawning.
+        if self._cancel_current:
+            raise _ExportCancelled
+        # Block here while the job is paused (e.g. paused between segments).
+        await self._resume.wait()
+
         log.info("export job %d: %s", job_id, " ".join(cmd))
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
+        self._current_proc = proc
+        # If a pause raced in just before the spawn, stop the child now.
+        if self._paused:
+            with contextlib.suppress(Exception):
+                proc.send_signal(signal.SIGSTOP)
 
         stderr_tail: list[str] = []
 
@@ -683,6 +1100,11 @@ class ExportWorker:
         await asyncio.gather(
             pump_stdout(), pump_stderr(), proc.wait()
         )
+        self._current_proc = None
+        # If the job was cancelled (its child was killed), unwind cleanly
+        # instead of reporting a spurious ffmpeg failure for a deleted row.
+        if self._cancel_current:
+            raise _ExportCancelled
         rc = proc.returncode or 0
         err = " | ".join(stderr_tail[-3:]) if stderr_tail else ""
         return rc, err

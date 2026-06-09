@@ -16,16 +16,25 @@ import logging
 import os
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 
 from ..auth import require_csrf, require_session
+from ..services import durations, filmstrip, route_cache, scanner, thumbs
 from ..services import gps as gps_service
-from ..services import route_cache, scanner, thumbs
+from ..services.naming import CHANNEL_LABELS, CHANNEL_ORDER, channel_of
 
 log = logging.getLogger("viofosync.archive")
+
+# Until ffprobe has populated ``clip_index.duration_s`` (a background sweep
+# that can take a while on a large archive), the timeline editor would see
+# zero-length clips and render nothing. Fall back to the gap until the next
+# clip on the same channel — dashcam clips are contiguous — capped so a
+# parking gap can't produce an absurdly long block. The last clip on a
+# channel has no successor to measure, so it gets a typical-clip default.
+FALLBACK_MAX_S = 300.0
+FALLBACK_DEFAULT_S = 60.0
 
 router = APIRouter(
     prefix="/api/archive",
@@ -52,7 +61,7 @@ _KIND_TO_EVENT_TYPE = {
 }
 
 
-def _kind_filter_clause(driving: bool, parking: bool, ro: bool) -> Optional[str]:
+def _kind_filter_clause(driving: bool, parking: bool, ro: bool) -> str | None:
     """Build a WHERE fragment for the three event-type filters.
 
     All on → no filter. All off → ``1 = 0`` (no rows). Otherwise
@@ -71,8 +80,8 @@ def _kind_filter_clause(driving: bool, parking: bool, ro: bool) -> Optional[str]
 @router.get("/days")
 def list_days(
     request: Request,
-    date_from: Optional[str] = Query(None, alias="from"),
-    date_to: Optional[str] = Query(None, alias="to"),
+    date_from: str | None = Query(None, alias="from"),
+    date_to: str | None = Query(None, alias="to"),
     driving: bool = Query(True),
     parking: bool = Query(True),
     ro: bool = Query(True),
@@ -137,8 +146,8 @@ def list_days(
 def get_day(
     request: Request,
     date: str,
-    time_from: Optional[str] = Query(None),
-    time_to: Optional[str] = Query(None),
+    time_from: str | None = Query(None),
+    time_to: str | None = Query(None),
     driving: bool = Query(True),
     parking: bool = Query(True),
     ro: bool = Query(True),
@@ -223,6 +232,48 @@ def get_day(
     return {"date": date, "clips": clips}
 
 
+def build_route_payload(db, recordings, date: str, geocoder) -> dict:
+    """Merged GPS track for a day plus detected journeys/stops, as a
+    JSON-able dict. Shared by GET /day/{date}/route and GET /timeline.
+
+    The GPX re-parse is the slow part (tens of seconds on a busy day) and
+    only changes when the day's GPX files change, so cache it keyed by a
+    signature of those files. Labels are applied after, on every request,
+    so they stay current as the geocode cache fills.
+
+    ``geocoder`` is the app's geocoder (or None); only its synchronous
+    ``cache_lookup`` is used here — uncached labels are fetched lazily
+    by the UI via /geocode after first paint.
+    """
+    with db.conn() as c:
+        rows = c.execute(
+            """
+            SELECT path FROM clip_index
+            WHERE group_name = ? AND has_gpx = 1
+            ORDER BY timestamp ASC
+            """,
+            (date,),
+        ).fetchall()
+
+    gpx_paths = [r["path"] + ".gpx" for r in rows]
+    sig = route_cache.signature(gpx_paths)
+    payload = route_cache.load(recordings, date, sig)
+    if payload is None:
+        log.info(
+            "route: aggregating %d GPX file(s) for %s", len(gpx_paths), date
+        )
+        points, stops, journeys = gps_service.aggregate_day(gpx_paths)
+        log.info(
+            "route: aggregated %s -> %d point(s), %d journey(s), %d stop(s)",
+            date, len(points), len(journeys), len(stops),
+        )
+        payload = _assemble_route(date, points, stops, journeys)
+        route_cache.store(recordings, date, sig, payload)
+
+    _apply_labels(payload, geocoder)
+    return payload
+
+
 def _assemble_route(date: str, points, stops, journeys) -> dict:
     """Build the route payload (no labels — those are applied on read so
     they stay current as the geocode cache fills). This is the expensive-
@@ -295,32 +346,137 @@ def get_route(request: Request, date: str) -> dict:
         _dt.date.fromisoformat(date)
     except ValueError:
         raise HTTPException(400, "bad date format")
+    geocoder = getattr(request.app.state, "geocode", None)
+    return build_route_payload(
+        _db(request), _settings(request).recordings, date, geocoder
+    )
 
-    with _db(request).conn() as c:
+
+def _effective_durations(rows) -> dict[int, float]:
+    """Map clip id -> a usable duration. Uses the real probed ``duration_s``
+    when present; otherwise estimates from the gap to the next clip on the
+    same channel (capped), so the editor renders before ffprobe catches up.
+    ``rows`` must be ordered by timestamp ascending."""
+    by_channel: dict[str, list] = {}
+    for r in rows:
+        by_channel.setdefault(channel_of(r["camera"]), []).append(r)
+
+    eff: dict[int, float] = {}
+    for chrows in by_channel.values():
+        for i, r in enumerate(chrows):
+            real = r["duration_s"] or 0.0
+            if real > 0:
+                eff[r["id"]] = float(real)
+                continue
+            if i + 1 < len(chrows):
+                gap = chrows[i + 1]["timestamp"] - r["timestamp"]
+                eff[r["id"]] = (
+                    float(min(gap, FALLBACK_MAX_S))
+                    if gap > 0 else FALLBACK_DEFAULT_S
+                )
+            else:
+                eff[r["id"]] = FALLBACK_DEFAULT_S
+    return eff
+
+
+@router.get("/timeline")
+def get_timeline(
+    request: Request,
+    date: str,
+    journey: int | None = Query(None, ge=0),
+    driving: bool = Query(True),
+    parking: bool = Query(True),
+    ro: bool = Query(True),
+) -> dict:
+    """Everything the timeline editor needs for one journey (or a whole
+    day when ``journey`` is omitted): channels present, clips with
+    channel + start_ts + duration, time bounds, and the GPS route."""
+    try:
+        _dt.date.fromisoformat(date)
+    except ValueError:
+        raise HTTPException(400, "bad date format, use YYYY-MM-DD") from None
+
+    log.info("timeline: open date=%s journey=%s — building route", date, journey)
+    geocoder = getattr(request.app.state, "geocode", None)
+    db = _db(request)
+    route = build_route_payload(
+        db, _settings(request).recordings, date, geocoder
+    )
+    log.info(
+        "timeline: route built (%d GPS point(s)) — querying clips",
+        route["point_count"],
+    )
+
+    start_ts: float | None = None
+    end_ts: float | None = None
+    if journey is not None:
+        journeys = route["journeys"]
+        if journey >= len(journeys):
+            raise HTTPException(404, "journey index out of range")
+        j = journeys[journey]
+        start_ts, end_ts = j["start_ts"], j["end_ts"]
+
+    where = ["group_name = ?"]
+    params: list = [date]
+    kind_clause = _kind_filter_clause(driving, parking, ro)
+    if kind_clause is not None:
+        where.append(kind_clause)
+
+    with db.conn() as c:
         rows = c.execute(
-            """
-            SELECT path FROM clip_index
-            WHERE group_name = ? AND has_gpx = 1
+            f"""
+            SELECT id, camera, timestamp, duration_s
+            FROM clip_index
+            WHERE {' AND '.join(where)}
             ORDER BY timestamp ASC
             """,
-            (date,),
+            params,
         ).fetchall()
 
-    gpx_paths = [r["path"] + ".gpx" for r in rows]
+    eff_dur = _effective_durations(rows)
 
-    # The GPX re-parse is the slow part (tens of seconds on a busy day) and
-    # only changes when the day's GPX files change, so cache it keyed by a
-    # signature of those files. Labels are applied after, on every request.
-    recordings = _settings(request).recordings
-    sig = route_cache.signature(gpx_paths)
-    payload = route_cache.load(recordings, date, sig)
-    if payload is None:
-        points, stops, journeys = gps_service.aggregate_day(gpx_paths)
-        payload = _assemble_route(date, points, stops, journeys)
-        route_cache.store(recordings, date, sig, payload)
+    clips = []
+    present: set[str] = set()
+    for r in rows:
+        ts = r["timestamp"]
+        dur = eff_dur[r["id"]]
+        if start_ts is not None and (ts > end_ts or (ts + dur) < start_ts):
+            continue
+        ch = channel_of(r["camera"])
+        present.add(ch)
+        clips.append({
+            "id": r["id"],
+            "channel": ch,
+            "start_ts": ts,
+            "duration_s": dur,
+        })
 
-    _apply_labels(payload, getattr(request.app.state, "geocode", None))
-    return payload
+    channels = [
+        {"key": k, "label": CHANNEL_LABELS[k]}
+        for k in CHANNEL_ORDER
+        if k in present
+    ]
+
+    if start_ts is None and clips:
+        start_ts = min(c["start_ts"] for c in clips)
+        end_ts = max(c["start_ts"] + c["duration_s"] for c in clips)
+
+    # Each clip block lazy-loads a filmstrip sprite, so this count is how
+    # many ffmpeg jobs the editor may kick off — the usual cause of a NAS
+    # CPU spike on open.
+    log.info(
+        "timeline: date=%s journey=%s -> %d clip(s) across %d channel(s)",
+        date, journey, len(clips), len(channels),
+    )
+
+    return {
+        "date": date,
+        "journey": journey,
+        "bounds": {"start_ts": start_ts, "end_ts": end_ts},
+        "channels": channels,
+        "clips": clips,
+        "gps": route if route["point_count"] > 0 else None,
+    }
 
 
 @router.get("/geocode")
@@ -342,7 +498,7 @@ async def geocode(
 def _fetch_clip(request: Request, clip_id: int) -> dict:
     with _db(request).conn() as c:
         row = c.execute(
-            "SELECT id, path, basename, size_bytes "
+            "SELECT id, path, basename, size_bytes, duration_s "
             "FROM clip_index WHERE id = ?",
             (clip_id,),
         ).fetchone()
@@ -370,6 +526,41 @@ async def clip_thumb(request: Request, clip_id: int):
         )
         return Response(content=tiny, media_type="image/png")
     return FileResponse(path, media_type="image/jpeg")
+
+
+@router.get("/clip/{clip_id}/filmstrip")
+async def clip_filmstrip(request: Request, clip_id: int):
+    """Slicing metadata for the clip's filmstrip sprite (generates it
+    on demand). 204 when ffmpeg is unavailable so the UI shows
+    placeholder tiles."""
+    clip = _fetch_clip(request, clip_id)
+    s = _settings(request)
+    meta = await filmstrip.ensure_filmstrip(
+        s.recordings, clip_id, clip["path"], clip.get("duration_s")
+    )
+    if meta is None:
+        return Response(status_code=204)
+    return {
+        "sprite_url": f"/api/archive/clip/{clip_id}/filmstrip.jpg",
+        "frames": meta.frames,
+        "interval_s": meta.interval_s,
+        "tile_w": meta.tile_w,
+        "tile_h": meta.tile_h,
+        "duration_s": meta.duration_s,
+    }
+
+
+@router.get("/clip/{clip_id}/filmstrip.jpg")
+async def clip_filmstrip_jpg(request: Request, clip_id: int):
+    clip = _fetch_clip(request, clip_id)
+    s = _settings(request)
+    meta = await filmstrip.ensure_filmstrip(
+        s.recordings, clip_id, clip["path"], clip.get("duration_s")
+    )
+    sp = filmstrip.sprite_path(s.recordings, clip_id)
+    if meta is None or not os.path.exists(sp):
+        raise HTTPException(404, "no filmstrip")
+    return FileResponse(sp, media_type="image/jpeg")
 
 
 @router.get("/clip/{clip_id}/video")
@@ -406,6 +597,7 @@ async def rescan(request: Request) -> JSONResponse:
             request.app.state.db, s.recordings,
         )
     )
+    asyncio.create_task(durations.sweep_missing_durations(request.app.state.db))
     return JSONResponse({"ok": True, "indexed": n})
 
 

@@ -243,6 +243,15 @@ function routeTo(hash) {
   if (logsView) logsView.hidden = tab !== "logs";
   const settingsView = document.getElementById("view-settings");
   if (settingsView) settingsView.hidden = tab !== "settings";
+  const timelineView = document.getElementById("view-timeline");
+  if (timelineView) {
+    timelineView.hidden = tab !== "timeline";
+    // Stop timeline playback when navigating away (a hidden <video>
+    // keeps playing audio otherwise).
+    if (tab !== "timeline" && window.Timeline && window.Timeline.close) {
+      window.Timeline.close();
+    }
+  }
   if (tab === "archive") {
     loadDays();
     refreshExportJobs();
@@ -253,6 +262,15 @@ function routeTo(hash) {
   if (tab === "downloads") loadQueue();
   if (tab === "logs") loadLogs();
   if (tab === "settings") loadSettings();
+  if (tab === "timeline") {
+    stopArchiveAutoRefresh();
+    // "#/timeline/<date>/<journeyIdx?>" — segments after the tab.
+    const segs = stripped.split("/");
+    const date = segs[1] || "";
+    const n = segs[2] != null && segs[2] !== "" ? Number(segs[2]) : null;
+    const journey = Number.isInteger(n) && n >= 0 ? n : null;
+    if (window.Timeline && date) window.Timeline.open(date, journey);
+  }
 }
 
 // Periodic rescan + reload so freshly downloaded clips appear
@@ -504,7 +522,7 @@ async function renderDayBody(body, date) {
 
   for (const ev of events) {
     if (ev.kind === "journey") {
-      body.appendChild(renderJourneyCard(ev.data, ev.clips, ev.idx));
+      body.appendChild(renderJourneyCard(ev.data, ev.clips, ev.idx, date));
     } else {
       body.appendChild(renderStopCard(ev.data, ev.clips, ev.idx));
     }
@@ -672,7 +690,7 @@ function renderStopCard(stop, clips, idx) {
   return el;
 }
 
-function renderJourneyCard(j, clips, idx) {
+function renderJourneyCard(j, clips, idx, date) {
   const el = document.createElement("div");
   el.className = "journey-card collapsible";
   const mapId = `journey-map-${j.start_ts}-${idx}`;
@@ -699,6 +717,8 @@ function renderJourneyCard(j, clips, idx) {
       <span class="journey-meta">
         ${fmtDuration(j.duration_s)} · ${distance} · ${clips.length} clip${clips.length === 1 ? "" : "s"}
       </span>
+      <button type="button" class="journey-open-tl"
+              title="Open this journey in the timeline view">Timeline</button>
     </div>
     <div class="journey-body" hidden>
       <div id="${mapId}" class="journey-map"></div>
@@ -797,6 +817,13 @@ function renderJourneyCard(j, clips, idx) {
 
   wireJourneyToggle(el, initMap);
   wireJourneyCheck(el);
+  const tlBtn = el.querySelector(".journey-open-tl");
+  if (tlBtn) {
+    tlBtn.addEventListener("click", (e) => {
+      e.stopPropagation();              // don't toggle the card
+      location.hash = `#/timeline/${date}/${idx}`;
+    });
+  }
   return el;
 }
 
@@ -1202,6 +1229,19 @@ const EXPORT_ICON_TRASH =
   '9Zm5.48.058a.75.75 0 1 0-1.498-.058l-.347 9a.75.75 0 0 0 1.5.058l.345-' +
   '9Z" clip-rule="evenodd"/></svg>';
 
+const EXPORT_ICON_PAUSE =
+  '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" ' +
+  'aria-hidden="true"><path d="M9 4.5H6.75A.75.75 0 0 0 6 5.25v13.5c0 ' +
+  '.414.336.75.75.75H9a.75.75 0 0 0 .75-.75V5.25A.75.75 0 0 0 9 4.5Zm8.25 ' +
+  '0H15a.75.75 0 0 0-.75.75v13.5c0 .414.336.75.75.75h2.25a.75.75 0 0 0 ' +
+  '.75-.75V5.25a.75.75 0 0 0-.75-.75Z"/></svg>';
+
+const EXPORT_ICON_RESUME =
+  '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" ' +
+  'aria-hidden="true"><path d="M5.25 5.653c0-1.426 1.529-2.33 2.779-1.643l' +
+  '11.54 6.348c1.295.712 1.295 2.573 0 3.285L8.029 19.99c-1.25.687-2.779-' +
+  '.217-2.779-1.643V5.653Z"/></svg>';
+
 function escapeExportText(s) {
   const d = document.createElement("div");
   d.textContent = String(s);
@@ -1268,7 +1308,7 @@ function renderExportJobs(jobs) {
       statusCell +=
         `<span class="export-err"> · ${escapeExportText(j.error)}</span>`;
     }
-    if (j.state === "running") {
+    if (j.state === "running" || j.state === "paused") {
       const pct = progVal != null ? Math.round(progVal * 100) : 0;
       const stage = liveHit && liveHit.stage ? ` · ${liveHit.stage}` : "";
       statusCell +=
@@ -1298,6 +1338,22 @@ function renderExportJobs(jobs) {
         `${EXPORT_ICON_DOWNLOAD}</a>`
       : `<span class="export-action export-action--empty" ` +
         `aria-hidden="true"></span>`;
+    // Pause (while rendering) / Resume (while paused). Empty slot otherwise
+    // so the row's action columns stay aligned.
+    let ctrl =
+      `<span class="export-action export-action--empty" aria-hidden="true">` +
+      `</span>`;
+    if (j.state === "running") {
+      ctrl =
+        `<button type="button" class="export-action export-pause" ` +
+        `data-id="${j.id}" data-act="pause" title="Pause" ` +
+        `aria-label="Pause export">${EXPORT_ICON_PAUSE}</button>`;
+    } else if (j.state === "paused") {
+      ctrl =
+        `<button type="button" class="export-action export-resume" ` +
+        `data-id="${j.id}" data-act="resume" title="Resume" ` +
+        `aria-label="Resume export">${EXPORT_ICON_RESUME}</button>`;
+    }
     const del =
       `<button type="button" class="export-action export-delete" ` +
       `data-id="${j.id}" title="Delete" aria-label="Delete export">` +
@@ -1307,7 +1363,7 @@ function renderExportJobs(jobs) {
       <td>${typeCell}</td>
       <td class="export-status">${statusCell}</td>
       <td class="export-footage">${footageCell}</td>
-      <td class="export-actions">${dl}${del}</td>
+      <td class="export-actions">${dl}${ctrl}${del}</td>
     `;
     tbody.appendChild(tr);
   }
@@ -1316,6 +1372,18 @@ function renderExportJobs(jobs) {
     btn.addEventListener("click", async () => {
       if (!confirm("Delete this export job and its output?")) return;
       await api(`/api/exports/${btn.dataset.id}`, { method: "DELETE" });
+      refreshExportJobs();
+    });
+  });
+  el.querySelectorAll(".export-pause, .export-resume").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      btn.disabled = true;
+      try {
+        await api(`/api/exports/${btn.dataset.id}/${btn.dataset.act}`,
+                  { method: "POST" });
+      } catch (err) {
+        // 409 if the job moved on (finished/failed) between render and click.
+      }
       refreshExportJobs();
     });
   });
@@ -2243,6 +2311,11 @@ function handleEvent(ev) {
       break;
     case "export_finished":
       if (state.exportProgress) delete state.exportProgress[ev.job_id];
+      if (!document.getElementById("view-archive").hidden) {
+        refreshExportJobs();
+      }
+      break;
+    case "export_state":   // pause/resume — reflect the new state live
       if (!document.getElementById("view-archive").hidden) {
         refreshExportJobs();
       }

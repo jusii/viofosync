@@ -142,6 +142,7 @@ def scan(db: Database, destination: str, grouping: str, hub=None, loop=None) -> 
 
     clips = list(_iter_clips(destination, grouping, source_dirs))
     seen_paths: List[str] = [clip.path for clip in clips]
+    log.info("scan: %d clip(s) found under %s", len(clips), destination)
 
     with db.write() as c:
         c.execute("BEGIN")
@@ -184,8 +185,14 @@ def scan(db: Database, destination: str, grouping: str, hub=None, loop=None) -> 
                     ),
                 )
 
-            # Drop index rows whose files vanished (retention
-            # policy or manual move).
+            # Drop index rows whose files vanished (retention policy or
+            # manual move). But a scan that found *nothing* almost always
+            # means the recordings volume is unavailable — not yet mounted
+            # at container start, or a transient NAS glitch — rather than
+            # the user having deleted their entire archive. Wiping the index
+            # there resets duration_s/gps_examined for every clip and kicks
+            # off a full duration re-sweep, GPS re-exam and thumb regen. So
+            # never prune on an empty scan when the index still holds rows.
             if seen_paths:
                 placeholders = ",".join("?" * len(seen_paths))
                 c.execute(
@@ -194,7 +201,15 @@ def scan(db: Database, destination: str, grouping: str, hub=None, loop=None) -> 
                     seen_paths,
                 )
             else:
-                c.execute("DELETE FROM clip_index")
+                existing = c.execute(
+                    "SELECT COUNT(*) FROM clip_index"
+                ).fetchone()[0]
+                if existing:
+                    log.warning(
+                        "scan found 0 clips but index holds %d — skipping "
+                        "prune (recordings dir %s likely unavailable)",
+                        existing, destination,
+                    )
             c.execute("COMMIT")
         except Exception:
             c.execute("ROLLBACK")

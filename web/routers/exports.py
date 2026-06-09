@@ -43,11 +43,18 @@ def _resolve_default_encoder(app_state) -> str:
     return pref
 
 
+class Segment(BaseModel):
+    channel: str = Field(pattern="^(front|rear|interior|other)$")
+    start_ts: float
+    end_ts: float
+
+
 class CreateExport(BaseModel):
     type: str = Field(
-        pattern="^(join_front|join_rear|pip|pip_rear)$"
+        pattern="^(join_front|join_rear|pip|pip_rear|switched)$"
     )
-    clip_ids: List[int]
+    clip_ids: List[int] = []
+    segments: list[Segment] | None = None
     encoder: str | None = Field(
         default=None,
         pattern="^(software|videotoolbox|nvenc|qsv|vaapi)$",
@@ -82,9 +89,13 @@ def create(body: CreateExport, request: Request) -> dict:
             f"encoder '{encoder}' not available on this server",
         )
     try:
-        job_id = worker.enqueue(
-            body.type, body.clip_ids, encoder=encoder,
-        )
+        if body.type == "switched":
+            segs = [s.model_dump() for s in (body.segments or [])]
+            job_id = worker.enqueue_switched(segs, encoder=encoder)
+        else:
+            job_id = worker.enqueue(
+                body.type, body.clip_ids, encoder=encoder,
+            )
     except RuntimeError as e:
         raise HTTPException(503, str(e))
     except ValueError as e:
@@ -152,7 +163,12 @@ def download(job_id: int, request: Request):
 
 
 @router.delete("/{job_id}", dependencies=[Depends(require_csrf)])
-def delete(job_id: int, request: Request) -> dict:
+async def delete(job_id: int, request: Request) -> dict:
+    # If this is the job currently rendering, kill its ffmpeg first so we
+    # don't leave an orphaned encoder running (and writing to a deleted row).
+    worker = getattr(request.app.state, "export_worker", None)
+    if worker is not None:
+        await worker.cancel(job_id)
     with request.app.state.db.write() as c:
         row = c.execute(
             "SELECT output_path FROM export_jobs WHERE id=?",
@@ -167,3 +183,23 @@ def delete(job_id: int, request: Request) -> dict:
                 pass
         c.execute("DELETE FROM export_jobs WHERE id=?", (job_id,))
     return {"ok": True}
+
+
+@router.post("/{job_id}/pause", dependencies=[Depends(require_csrf)])
+async def pause(job_id: int, request: Request) -> dict:
+    worker = getattr(request.app.state, "export_worker", None)
+    if worker is None:
+        raise HTTPException(503, "export worker not running")
+    if not await worker.pause(job_id):
+        raise HTTPException(409, "job is not currently rendering")
+    return {"ok": True, "state": "paused"}
+
+
+@router.post("/{job_id}/resume", dependencies=[Depends(require_csrf)])
+async def resume(job_id: int, request: Request) -> dict:
+    worker = getattr(request.app.state, "export_worker", None)
+    if worker is None:
+        raise HTTPException(503, "export worker not running")
+    if not await worker.resume(job_id):
+        raise HTTPException(409, "job is not currently paused")
+    return {"ok": True, "state": "running"}

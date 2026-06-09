@@ -7,6 +7,23 @@ services:
     ports:
       - "8080:8080"
 
+    # Optional: pass through the GPU for hardware-accelerated decode/encode
+    # (exports). On an Intel iGPU this now uses QuickSync (QSV) first and
+    # falls back to VA-API, then software. Uncomment on a NAS with an Intel
+    # iGPU. Verify it engaged with:  docker exec <c> vainfo   and check the
+    # startup log line "export encoder available: … qsv …".
+    # devices:
+    #   - /dev/dri:/dev/dri
+    #
+    # The entrypoint auto-detects the render node's group and adds the app
+    # user to it, so this is usually all you need. Some hosts (notably
+    # Synology DSM) still require the render group to be granted explicitly —
+    # if hardware accel doesn't engage, find the GID with
+    #   docker exec <c> sh -c 'stat -c %g /dev/dri/renderD128'
+    # and add it here (937 is common on Synology):
+    # group_add:
+    #   - "937"   # GID owning /dev/dri/renderD128 — the iGPU render node
+
     volumes:
       # Config directory. A template viofosync.env is seeded here on first
       # run — edit it (ADDRESS, WEB_PASSWORD, etc.) and restart to apply.
