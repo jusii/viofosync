@@ -42,6 +42,18 @@ def _job(db: Database, jid: int, state: str = "running") -> None:
         )
 
 
+def test_partial_path_keeps_inferable_extension(tmp_path: Path):
+    """ffmpeg chooses its muxer from the output filename's extension, so
+    the staged partial must end in a real container extension (.mp4), not
+    a bare .part it can't infer (regression: '{id}.mp4.part' made ffmpeg
+    fail with 'Unable to choose an output format')."""
+    rec = str(tmp_path)
+    part = exp_mod._partial_path(rec, 3)
+    assert part.endswith(".mp4"), part
+    assert ".part" in Path(part).name
+    assert part != exp_mod._output_path(rec, 3)
+
+
 async def test_finish_success_renames_part_to_final(env):
     rec, db, worker = env
     _job(db, 5)

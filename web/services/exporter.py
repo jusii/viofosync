@@ -68,15 +68,23 @@ def _partial_path(recordings: str, job_id: int) -> str:
     """ffmpeg writes here; the verified result is renamed onto the
     canonical path. A failed/cancelled job leaves only this, which is
     then removed — so a partial never lands at the final name (where
-    it would be unreferenced yet count against the quota)."""
-    return _output_path(recordings, job_id) + ".part"
+    it would be unreferenced yet count against the quota).
+
+    The ``.part`` marker goes *before* the extension ({id}.part.mp4, not
+    {id}.mp4.part): ffmpeg picks its muxer from the filename extension, so
+    a bare ``.part`` tail makes it fail with "Unable to choose an output
+    format". This mirrors the ``.part.jpg`` staging in thumbs/filmstrip."""
+    base = _output_path(recordings, job_id)
+    root, ext = os.path.splitext(base)
+    return f"{root}.part{ext}"
 
 
 def sweep_orphan_exports(db: Database, recordings: str) -> int:
     """Remove leftover files in .exports that no completed job owns:
-    any ``*.mp4.part`` (a crashed render — no job survives a restart)
-    and any ``{id}.mp4`` without a matching ``done`` row. Returns the
-    count removed. Intended for the lifespan startup hook."""
+    any staged partial (``*.part.mp4``, or legacy ``*.mp4.part``) from a
+    crashed render — no job survives a restart — and any ``{id}.mp4``
+    without a matching ``done`` row. Returns the count removed. Intended
+    for the lifespan startup hook."""
     edir = os.path.join(recordings, EXPORT_DIR_NAME)
     if not os.path.isdir(edir):
         return 0
@@ -742,7 +750,10 @@ class ExportWorker:
         # junk. Cleanup is also keyed by job_id so it works even when
         # the caller passed output_path=None.
         if ok and output_path:
-            final = output_path[:-5] if output_path.endswith(".part") \
+            # Staged name is {id}.part.mp4 -> promote to {id}.mp4 by
+            # dropping the ".part" marker that sits before the extension.
+            root, ext = os.path.splitext(output_path)
+            final = root[: -len(".part")] + ext if root.endswith(".part") \
                 else output_path
             if final != output_path:
                 try:
