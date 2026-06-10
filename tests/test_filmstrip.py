@@ -83,7 +83,10 @@ async def test_ensure_generates_sprite_and_sidecar(tmp_path: Path, monkeypatch):
         assert "-hwaccel" not in c          # software only — hwaccel is slower here
     assert len(tiles) == 1
     assert tiles[0][tiles[0].index("-vf") + 1] == "tile=8x1"
-    assert tiles[0][-1] == filmstrip.sprite_path(rec, 5)
+    # Montage targets a staged temp name; the verified result is
+    # renamed onto the cache path (partial output must never land
+    # at the final path — see test_thumb_atomic.py).
+    assert tiles[0][-1] == filmstrip.sprite_path(rec, 5) + ".part.jpg"
 
 
 def _capture_all_exec(monkeypatch):

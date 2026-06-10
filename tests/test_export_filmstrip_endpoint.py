@@ -65,7 +65,9 @@ def test_list_jobs_reports_has_preview(logged_in_client, tmp_path):
     done_with = _insert_job(logged_in_client, "done", str(tmp_path / "a.mp4"))
     done_without = _insert_job(logged_in_client, "done", str(tmp_path / "b.mp4"))
     running = _insert_job(logged_in_client, "running", None)
-    Path(export_preview.preview_path(recordings, done_with)).write_bytes(
+    _pv = Path(export_preview.preview_path(recordings, done_with))
+    _pv.parent.mkdir(parents=True, exist_ok=True)
+    _pv.write_bytes(
         b"\xff\xd8\xff\xd9"
     )
 
@@ -82,7 +84,9 @@ def test_filmstrip_jpg_streams_cached_sprite(logged_in_client, tmp_path):
     app = logged_in_client.app
     recordings = app.state.settings_provider.get().recordings
     jid = _insert_job(logged_in_client, "done", str(tmp_path / "out.mp4"))
-    Path(export_preview.preview_path(recordings, jid)).write_bytes(b"\xff\xd8\xff\xd9")
+    _pv = Path(export_preview.preview_path(recordings, jid))
+    _pv.parent.mkdir(parents=True, exist_ok=True)
+    _pv.write_bytes(b"\xff\xd8\xff\xd9")
     r = logged_in_client.get(f"/api/exports/{jid}/filmstrip.jpg")
     assert r.status_code == 200
     assert r.headers["content-type"] == "image/jpeg"
@@ -122,6 +126,7 @@ def test_delete_removes_cached_preview(logged_in_client, tmp_path, monkeypatch):
     recordings = app.state.settings_provider.get().recordings
     jid = _insert_job(logged_in_client, "done", None)
     pv = export_preview.preview_path(recordings, jid)
+    Path(pv).parent.mkdir(parents=True, exist_ok=True)
     Path(pv).write_bytes(b"\xff\xd8\xff\xd9")
     assert os.path.exists(pv)
     csrf = logged_in_client.get("/api/auth/csrf").json()["csrf"]

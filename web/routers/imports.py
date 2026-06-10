@@ -16,7 +16,7 @@ from pydantic import BaseModel
 import viofosync_lib as vfs
 
 from ..auth import require_csrf, require_session
-from ..services import importer
+from ..services import exporter, importer
 from ..services import retention as _retention
 
 log = logging.getLogger("viofosync.import")
@@ -151,13 +151,18 @@ async def upload(request: Request) -> dict:
         disk_pct=snap.retention_disk_pct, quota_gb=snap.recordings_quota_gb,
         protect_ro=snap.retention_protect_ro,
         exclude=_retention.import_exclude_set(snap.recordings, snap.import_path),
+        protect_ids=exporter.export_protect_ids(db),
     ):
         log.warning("upload rejected (over quota, older than retained set): %s", name)
         return {"status": "over_quota_older", "filename": name}
 
     staging = os.path.join(snap.recordings, importer.STAGING_DIRNAME)
     os.makedirs(staging, exist_ok=True)
-    tmp = os.path.join(staging, name)
+    # Stream to a .part name; only a size-verified upload is renamed
+    # to the plain Viofo name. Staging recovery treats plain-named
+    # files as complete, so a crashed upload must never leave one.
+    tmp = os.path.join(staging, name + importer.UPLOAD_PART_SUFFIX)
+    staged = os.path.join(staging, name)
     written = 0
     try:
         with open(tmp, "wb") as f:
@@ -176,8 +181,9 @@ async def upload(request: Request) -> dict:
         log.warning("upload size mismatch for %s: got %d, expected %d", name, written, size)
         return {"status": "error", "filename": name, "detail": "size mismatch"}
 
+    os.replace(tmp, staged)
     item.size_bytes = written
-    item.src_path = tmp
+    item.src_path = staged
     res = await asyncio.to_thread(
         importer.ingest_clip, db, snap, item, cross_volume=False, staged=True,
     )

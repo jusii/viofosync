@@ -390,7 +390,25 @@ function archiveKindParams(q) {
   q.set("ro", state.filters.ro ? "true" : "false");
 }
 
+// Tear down Leaflet instances under `root` before its innerHTML is
+// wiped — Leaflet registers document-level listeners per map, so
+// dropping the DOM nodes without map.remove() leaks every instance
+// (the timeline view already does this; the archive didn't).
+function destroyJourneyMaps(root) {
+  for (const div of root.querySelectorAll(".journey-map")) {
+    const bundle = div._journeyMap;
+    if (bundle && bundle.map) {
+      try { bundle.map.remove(); } catch {}
+    }
+    div._journeyMap = null;
+  }
+}
+
 async function loadDays() {
+  // Stale-response guard (same token pattern as loadQueue): WS
+  // pushes, filter changes, and pagination can race; only the most
+  // recently requested page may render.
+  const reqId = (state.daysRequestId = (state.daysRequestId || 0) + 1);
   const q = new URLSearchParams({
     page: state.page, per_page: state.perPage,
     sort: "desc",
@@ -398,7 +416,9 @@ async function loadDays() {
   archiveKindParams(q);
 
   const data = await api("/api/archive/days?" + q);
+  if (reqId !== state.daysRequestId) return; // superseded
   const container = document.getElementById("days");
+  destroyJourneyMaps(container);
   container.innerHTML = "";
   if (!data.days.length) {
     container.innerHTML = `<p style="text-align:center;color:var(--muted)">
@@ -475,10 +495,12 @@ async function renderDayBody(body, date) {
     }
     [data, route] = await Promise.all(promises);
   } catch (e) {
+    destroyJourneyMaps(body);
     body.innerHTML = `<p style="color:var(--err)">Failed to load: ${e}</p>`;
     return;
   }
 
+  destroyJourneyMaps(body);
   body.innerHTML = "";
 
   const journeys = (route && route.journeys) || [];
@@ -2282,15 +2304,40 @@ for (const id of ["logs-level", "logs-logger", "logs-q"]) {
   document.getElementById(id).addEventListener("change", loadLogs);
 }
 
+let wsRetryDelayMs = 3000;
+
 function openSocket() {
-  if (state.ws) { try { state.ws.close(); } catch {} }
+  if (state.ws) {
+    // Mark the old socket so its close handler doesn't schedule a
+    // second reconnect loop alongside the new socket's.
+    state.ws._replaced = true;
+    try { state.ws.close(); } catch {}
+  }
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
-  state.ws = new WebSocket(`${proto}//${location.host}/api/progress`);
-  state.ws.addEventListener("message", (e) => {
+  const ws = new WebSocket(`${proto}//${location.host}/api/progress`);
+  state.ws = ws;
+  ws.addEventListener("open", () => {
+    wsRetryDelayMs = 3000; // healthy again — reset the backoff ladder
+    if (state.wsHadConnection) {
+      // The server's snapshot covers sync/session state but not list
+      // contents — clip_indexed / queue / export events missed while
+      // disconnected would otherwise leave these views stale.
+      refreshArchiveOnIndexChange();
+      refreshQueueIfVisible();
+      refreshExportJobs().catch(() => {});
+    }
+    state.wsHadConnection = true;
+  });
+  ws.addEventListener("message", (e) => {
     try { handleEvent(JSON.parse(e.data)); } catch {}
   });
-  state.ws.addEventListener("close", () => {
-    setTimeout(openSocket, 3000);
+  ws.addEventListener("close", () => {
+    if (ws._replaced) return;
+    // Exponential backoff with jitter: a fixed 3s retry from every
+    // open tab hammers a restarting server in lockstep.
+    const delay = wsRetryDelayMs + Math.random() * 1000;
+    wsRetryDelayMs = Math.min(wsRetryDelayMs * 2, 30000);
+    setTimeout(openSocket, delay);
   });
 }
 
@@ -3193,6 +3240,30 @@ window.addEventListener("hashchange", () => {
   const hide = (el) => el && el.classList.add("hidden");
   const csrfH = () => (state.csrf ? { "x-csrf-token": state.csrf } : {});
 
+  // fetch with api()'s session/CSRF semantics but raw Response
+  // semantics preserved (the import flow inspects r.ok / r.json()
+  // per file). Without this, a session expiring mid-import surfaced
+  // as opaque per-file "errors" with no login redirect, and a stale
+  // CSRF token failed the whole import with no retry.
+  async function ifetch(path, opts = {}) {
+    const send = () => fetch(path, {
+      ...opts,
+      headers: { ...(opts.headers || {}), ...csrfH() },
+      credentials: "same-origin",
+    });
+    let r = await send();
+    if (r.status === 403) {
+      const cr = await fetch("/api/auth/csrf", { credentials: "same-origin" });
+      if (cr.ok) state.csrf = (await cr.json()).csrf;
+      r = await send();
+    }
+    if (r.status === 401) {
+      showLogin();
+      throw new Error("session expired");
+    }
+    return r;
+  }
+
   $("import-btn").addEventListener("click", () => {
     hide($("import-summary")); hide($("import-progress"));
     show(modal);
@@ -3304,10 +3375,10 @@ window.addEventListener("hashchange", () => {
     let queue = picked;
     try {
       $("import-status").textContent = "Checking for clips already imported…";
-      const r = await fetch("/api/import/present", {
+      const r = await ifetch("/api/import/present", {
         method: "POST",
         credentials: "same-origin",
-        headers: { ...csrfH(), "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           files: picked.map((p) => ({ name: p.file.name, size: p.file.size })),
         }),
@@ -3325,11 +3396,10 @@ window.addEventListener("hashchange", () => {
       $("import-bar").style.width = `${(i / queue.length) * 100}%`;
       let res;
       try {
-        const r = await fetch("/api/import/upload", {
+        const r = await ifetch("/api/import/upload", {
           method: "POST",
           credentials: "same-origin",
           headers: {
-            ...csrfH(),
             "X-Import-Path": path,
             "X-Import-Size": String(file.size),
             "Content-Type": "application/octet-stream",
@@ -3350,17 +3420,17 @@ window.addEventListener("hashchange", () => {
       tally[key] = (tally[key] || 0) + 1;
     }
     $("import-bar").style.width = "100%";
-    await fetch("/api/archive/rescan", { method: "POST", credentials: "same-origin", headers: csrfH() });
+    await ifetch("/api/archive/rescan", { method: "POST" });
     renderSummary(tally);
   });
 
   // --- Folder tab ---
   $("import-folder-scan").addEventListener("click", async () => {
     const path = $("import-folder-path").value.trim() || null;
-    const r = await fetch("/api/import/scan", {
+    const r = await ifetch("/api/import/scan", {
       method: "POST",
       credentials: "same-origin",
-      headers: { ...csrfH(), "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ path }),
     });
     if (!r.ok) {
@@ -3384,10 +3454,10 @@ window.addEventListener("hashchange", () => {
     const path = e.target.dataset.path || null;
     show($("import-progress")); hide($("import-summary"));
     $("import-status").textContent = "Starting…";
-    const r = await fetch("/api/import/ingest", {
+    const r = await ifetch("/api/import/ingest", {
       method: "POST",
       credentials: "same-origin",
-      headers: { ...csrfH(), "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ path }),
     });
     if (!r.ok) {

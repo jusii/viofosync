@@ -9,11 +9,14 @@ idempotent (only NULL/zero rows are probed), non-fatal on failure.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import shutil
 
 from ..db import Database
+
+_FFPROBE_TIMEOUT_S = 15.0
 
 log = logging.getLogger("viofosync.durations")
 
@@ -149,8 +152,20 @@ async def _probe_duration_ffprobe(path: str) -> float | None:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
         )
-        out, _ = await asyncio.wait_for(proc.communicate(), timeout=15.0)
-    except (TimeoutError, OSError):
+    except OSError:
+        return None
+    try:
+        out, _ = await asyncio.wait_for(
+            proc.communicate(), timeout=_FFPROBE_TIMEOUT_S,
+        )
+    except TimeoutError:
+        # Kill and reap — abandoning the child left it running
+        # (possibly stuck on NAS I/O) and a zombie once it exited.
+        proc.kill()
+        with contextlib.suppress(Exception):
+            await proc.wait()
+        return None
+    except OSError:
         return None
     try:
         d = float(out.decode().strip())

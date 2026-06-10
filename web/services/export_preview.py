@@ -38,14 +38,12 @@ def _semaphore() -> asyncio.Semaphore:
     return sem
 
 
-def _cache_dir(recordings: str) -> str:
-    d = os.path.join(recordings, PREVIEW_DIR_NAME)
-    os.makedirs(d, exist_ok=True)
-    return d
-
-
 def preview_path(recordings: str, job_id: int) -> str:
-    return os.path.join(_cache_dir(recordings), f"{job_id}.jpg")
+    # Pure computation — no makedirs here. The directory is created
+    # at generation time; a path helper with filesystem side effects
+    # meant a mere GET /api/exports wrote to disk (and bare-MagicMock
+    # test providers littered the repo root with MagicMock/ dirs).
+    return os.path.join(recordings, PREVIEW_DIR_NAME, f"{job_id}.jpg")
 
 
 def preview_timestamps(duration_s: float | None, n: int = N_FRAMES) -> list[float]:
@@ -75,6 +73,7 @@ async def ensure_export_preview(
     timestamps = preview_timestamps(duration_s)
     log.info("export preview: generating job=%s (%d frames)", job_id, len(timestamps))
     started = time.monotonic()
+    os.makedirs(os.path.dirname(sp), exist_ok=True)
     async with _semaphore():
         ok = await filmstrip.generate_sprite_at(ffmpeg, output_path, sp, timestamps)
     elapsed = time.monotonic() - started

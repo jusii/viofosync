@@ -11,6 +11,7 @@ single download call to apply per-request overrides.
 from __future__ import annotations
 
 import datetime
+import errno
 import http.client
 import logging
 import os
@@ -300,11 +301,16 @@ def download_file(base_url, recording, destination, group_name,
     )
     url = f"{base_url}/{cleaned.lstrip('/')}"
 
-    # Check expected size via HEAD.
+    # Check expected size via HEAD. Some firmwares drop HEAD under
+    # load — fall back to the listing size so integrity verification
+    # still runs (a connection closed cleanly mid-stream otherwise
+    # archives a truncated file as a success).
     try:
         expected_size = get_remote_size(url, socket_timeout)
     except Exception:
         expected_size = None
+    if expected_size is None:
+        expected_size = recording.size
 
     # Skip if already downloaded and size matches.
     if os.path.exists(dest_filepath):
@@ -396,6 +402,11 @@ def download_file(base_url, recording, destination, group_name,
                 )
                 raise
             except Exception as e:
+                if isinstance(e, OSError) and e.errno == errno.ENOSPC:
+                    # Full disk: retrying can only fail the same way
+                    # and would burn the item's retry budget. Raise so
+                    # the caller can surface a sticky disk error.
+                    raise
                 logger.warning(
                     f"Download attempt {attempt} failed for "
                     f"{recording.filename}: {e}"

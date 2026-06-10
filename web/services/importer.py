@@ -213,11 +213,13 @@ def ingest_clip(
                           size_bytes=item.size_bytes, event_type=item.event_type)
 
     if not staged:
+        from .exporter import export_protect_ids
         ok = _retention.make_room_for(
             db, recordings, size=item.size_bytes, before_ts=item.timestamp,
             disk_pct=snap.retention_disk_pct, quota_gb=snap.recordings_quota_gb,
             protect_ro=snap.retention_protect_ro,
             exclude=_retention.import_exclude_set(recordings, snap.import_path),
+            protect_ids=export_protect_ids(db),
         )
         if not ok:
             return ClipResult(item.basename, "over_quota_older",
@@ -284,15 +286,87 @@ def ingest_clip(
                       size_bytes=item.size_bytes, event_type=item.event_type)
 
 
-def _clean_staging(recordings: str) -> None:
+# Browser uploads stream to ``<name>.part`` and are renamed to the
+# plain Viofo name only after size verification — so a plain-named
+# staged file is complete by construction (same-volume ingest stages
+# via atomic rename) and safe to recover; a ``.part`` file never is.
+UPLOAD_PART_SUFFIX = ".part"
+_STALE_PART_S = 3600.0
+
+
+def _tidy_staging(recordings: str) -> None:
+    """Remove staging debris that is provably not worth keeping:
+    unrecognised files and stale ``.part`` uploads. Fresh ``.part``
+    files (an upload streaming right now) and recognised complete
+    clips (recoverable — see :func:`recover_staging`) are left alone.
+    The old behaviour deleted everything, which destroyed the only
+    copy of a clip after a crash mid-ingest and tore down concurrent
+    browser uploads."""
     staging = os.path.join(recordings, STAGING_DIRNAME)
     if not os.path.isdir(staging):
         return
     for name in os.listdir(staging):
+        path = os.path.join(staging, name)
+        if name.endswith(UPLOAD_PART_SUFFIX):
+            try:
+                stale = time.time() - os.path.getmtime(path) > _STALE_PART_S
+            except OSError:
+                continue
+            if not stale:
+                continue
+        elif vfs.downloaded_filename_re.match(name):
+            continue  # complete staged clip — recover_staging's job
         try:
-            os.remove(os.path.join(staging, name))
+            os.remove(path)
         except OSError:  # pragma: no cover — best-effort
             pass
+
+
+def recover_staging(db: Database, snap) -> dict:
+    """Salvage complete staged clips left behind by a crash between
+    the staging move and the final rename, then tidy remaining debris.
+
+    Recovery re-runs the normal ingest (make-room included); the
+    staging "move" is a same-path no-op. A clip that can't be placed
+    (over quota, IO error) stays staged for the next attempt rather
+    than being deleted. Original ``RO/`` context is lost in staging,
+    so recovered clips classify from their camera code alone.
+    """
+    recordings = snap.recordings
+    staging = os.path.join(recordings, STAGING_DIRNAME)
+    summary = {"recovered": 0, "failed": 0}
+    if os.path.isdir(staging):
+        for name in sorted(os.listdir(staging)):
+            m = vfs.downloaded_filename_re.match(name)
+            if not m:
+                continue
+            path = os.path.join(staging, name)
+            try:
+                size = os.path.getsize(path)
+            except OSError:
+                continue
+            try:
+                item = scan_item_from_match(
+                    m, name, source_rel_path=name, size=size, src_path=path,
+                )
+            except ValueError:
+                continue
+            res = ingest_clip(db, snap, item, cross_volume=False,
+                              staged=False)
+            if res.status == "imported":
+                log.info("recovered staged clip %s", name)
+                summary["recovered"] += 1
+            elif res.status == "already_present":
+                try:
+                    os.remove(path)  # archive already has it
+                except OSError:
+                    pass
+            else:
+                log.warning("staged clip %s not recovered: %s",
+                            name, res.status)
+                summary["failed"] += 1
+    _tidy_staging(recordings)
+    return summary
 
 
 def _broadcast(hub, loop, event: dict) -> None:
@@ -311,7 +385,7 @@ def run_folder_ingest(db: Database, snap, hub, loop, *, root: str) -> dict:
     """Ingest every recognised clip under ``root`` (newest-first),
     then run the post-sync pipeline. Runs on a worker thread."""
     recordings = snap.recordings
-    _clean_staging(recordings)  # clear debris from any prior aborted run
+    recover_staging(db, snap)  # salvage any prior aborted run first
     man = scan_source(root)
     cross = is_cross_volume(root, recordings)
 
@@ -341,6 +415,7 @@ def run_folder_ingest(db: Database, snap, hub, loop, *, root: str) -> dict:
         asyncio.run_coroutine_threadsafe(
             scanner.sweep_missing_thumbs(db, recordings), loop,
         )
+    from .exporter import export_protect_ids
     _retention.sweep(
         db, recordings,
         max_days=snap.retention_max_days,
@@ -348,6 +423,7 @@ def run_folder_ingest(db: Database, snap, hub, loop, *, root: str) -> dict:
         protect_ro=snap.retention_protect_ro,
         quota_gb=snap.recordings_quota_gb,
         exclude=_retention.import_exclude_set(recordings, snap.import_path),
+        protect_ids=export_protect_ids(db),
     )
     log.info(
         "import complete: %d imported, %d already_present, %d not_recognised, "
@@ -357,5 +433,7 @@ def run_folder_ingest(db: Database, snap, hub, loop, *, root: str) -> dict:
         summary["errors"],
     )
     _broadcast(hub, loop, {"type": "import_done", **summary})
-    _clean_staging(recordings)
+    # Tidy (not wipe): keeps recoverable clips from this run's
+    # failures and any concurrent browser upload's fresh .part file.
+    _tidy_staging(recordings)
     return summary

@@ -171,6 +171,21 @@ class MqttService:
         self._detail: Optional[str] = None
         self._last_published_at: Optional[float] = None
         self._coalescer = PublishCoalescer()
+        # Current discovery topology, so on_settings_changed can
+        # publish cleanup deletes against the OLD topics when the
+        # node id / prefix change. Owned here — previously poked in
+        # from lifespan, which any other constructor caller forgot.
+        self._last_node_id: Optional[str] = None
+        self._last_discovery_prefix: Optional[str] = None
+        if provider is not None:
+            try:
+                snap = provider.get()
+                self._last_node_id = getattr(snap, "mqtt_node_id", None)
+                self._last_discovery_prefix = getattr(
+                    snap, "mqtt_discovery_prefix", None,
+                )
+            except Exception:  # pragma: no cover — defensive
+                pass
 
     # ---- status ----
 
@@ -187,6 +202,12 @@ class MqttService:
         }
 
     BACKOFF_STEPS = (1.0, 2.0, 5.0, 15.0, 60.0)
+    # A connection that survived at least this long counts as stable:
+    # the next reconnect starts back at the first backoff step.
+    # Without this, backoff_idx only ever grew over the process
+    # lifetime — a handful of blips spread across weeks pushed every
+    # future reconnect to the full 60s wait.
+    STABLE_RESET_S = 60.0
 
     def start(self) -> None:
         if self._task is not None and not self._task.done():
@@ -244,11 +265,11 @@ class MqttService:
             if not cfg["host"]:
                 self._set_state(ConnState.IDLE, detail="MQTT_HOST not set")
                 return
+            attempt_started = time.monotonic()
             try:
                 self._set_state(ConnState.CONNECTING,
                                 detail=f"{cfg['host']}:{cfg['port']}")
                 await self._connect_and_loop(aiomqtt, cfg)
-                backoff_idx = 0
             except asyncio.CancelledError:
                 raise
             except aiomqtt.MqttError as e:
@@ -284,6 +305,11 @@ class MqttService:
                 self._set_state(ConnState.ERROR, detail=str(e))
             if self._stop.is_set():
                 break
+            # _connect_and_loop only exits by raising, so a "success"
+            # reset is unreachable — instead, a connection that held
+            # for STABLE_RESET_S earns a fresh backoff ladder.
+            if time.monotonic() - attempt_started >= self.STABLE_RESET_S:
+                backoff_idx = 0
             delay = self.BACKOFF_STEPS[min(backoff_idx, len(self.BACKOFF_STEPS) - 1)]
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=delay)
@@ -422,6 +448,12 @@ class MqttService:
         original_schedule = self._hub.schedule_broadcast
 
         def _intercepting_schedule(running_loop, event: dict) -> None:
+            # Mirror Hub.schedule_broadcast: callers may pass None and
+            # rely on the loop bound in lifespan.
+            running_loop = running_loop or getattr(self._hub, "_loop", None)
+            if running_loop is None:
+                log.warning("no event loop bound, dropping event %s", event)
+                return
             try:
                 asyncio.run_coroutine_threadsafe(
                     _intercepting_broadcast(event), running_loop,

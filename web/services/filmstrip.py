@@ -153,10 +153,21 @@ async def generate_sprite_at(
             if rc != 0 or not (os.path.exists(tile) and os.path.getsize(tile) > 0):
                 return False
         pattern = os.path.join(tiles_dir, "f%04d.jpg")
+        # Montage to a temp name; rename only a verified result.
+        # Writing the final path directly left a partial sprite that
+        # the callers' exists()+size cache checks then served forever.
+        tmp_sprite = f"{sprite}.part.jpg"
         rc = await _run_ffmpeg(
-            _tile_cmd(ffmpeg, pattern, len(timestamps), sprite), _FFMPEG_TIMEOUT_S,
+            _tile_cmd(ffmpeg, pattern, len(timestamps), tmp_sprite),
+            _FFMPEG_TIMEOUT_S,
         )
-        return rc == 0 and os.path.exists(sprite) and os.path.getsize(sprite) > 0
+        if (rc == 0 and os.path.exists(tmp_sprite)
+                and os.path.getsize(tmp_sprite) > 0):
+            os.replace(tmp_sprite, sprite)
+            return True
+        with contextlib.suppress(OSError):
+            os.remove(tmp_sprite)
+        return False
     finally:
         shutil.rmtree(tiles_dir, ignore_errors=True)
 

@@ -676,8 +676,9 @@ def retry_failed(db: Database) -> int:
 
 
 def emit_queue_changed(db: Database, hub, *, loop=None) -> None:
-    """Broadcast queue_changed; ``loop`` required when calling from
-    a non-loop thread (sync_worker download thread)."""
+    """Broadcast queue_changed from any caller context. Off-loop
+    callers may pass ``loop``; otherwise the hub's bound loop is
+    used (threadpool route handlers used to drop the event here)."""
     if hub is None:
         return
     with db.conn() as c:
@@ -697,5 +698,4 @@ def emit_queue_changed(db: Database, hub, *, loop=None) -> None:
         return
     except RuntimeError:
         pass
-    if loop is not None:
-        hub.schedule_broadcast(loop, event)
+    hub.schedule_broadcast(loop, event)

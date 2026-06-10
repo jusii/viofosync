@@ -55,6 +55,20 @@ log = logging.getLogger("viofosync.web")
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
 
 
+def _sync_worker_action(keys: set, snap) -> str | None:
+    """Decide how a settings change affects the sync worker.
+
+    Returns ``"start"``, ``"stop"``, or None (no relevant change).
+    Pure so the decision is unit-testable apart from the lifespan
+    wiring.
+    """
+    if not ({"ADDRESS", "ENABLE_SCHEDULED_SYNC"} & keys):
+        return None
+    if snap.enable_scheduled_sync and snap.address:
+        return "start"
+    return "stop"
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup / shutdown hook.
@@ -109,6 +123,18 @@ async def lifespan(app: FastAPI):
     )
 
     async def _background_scan() -> None:
+        # Salvage staged clips from a crash mid-import before the
+        # scan, so the recovered files get indexed in the same pass.
+        try:
+            from .services import importer as _imp_mod
+            rec = await asyncio.to_thread(
+                _imp_mod.recover_staging, app.state.db, s,
+            )
+            if rec["recovered"]:
+                log.info("recovered %d staged clip(s) from a previous "
+                         "interrupted import", rec["recovered"])
+        except Exception as e:  # pragma: no cover — non-fatal
+            log.warning("staging recovery failed: %s", e)
         try:
             log.info("initial archive scan: starting (%s)", s.recordings)
             loop = asyncio.get_running_loop()
@@ -145,6 +171,7 @@ async def lifespan(app: FastAPI):
                 disk_pct=s.retention_disk_pct,
                 protect_ro=s.retention_protect_ro,
                 quota_gb=s.recordings_quota_gb,
+                protect_ids=_exp_mod.export_protect_ids(app.state.db),
             )
         except Exception:  # pragma: no cover — non-fatal
             log.exception("startup retention sweep failed")
@@ -158,6 +185,9 @@ async def lifespan(app: FastAPI):
         settings_provider=provider,
         session=app.state.download_session,
     )
+    # Threadpool route handlers emit events without a loop reference;
+    # the hub falls back to this bound loop.
+    app.state.hub.bind_loop(asyncio.get_running_loop())
     # Now that db + hub + loop exist, let the log handler persist and
     # live-broadcast records. Records logged earlier in startup were
     # buffered by the handler and flush when the drain task starts.
@@ -211,6 +241,21 @@ async def lifespan(app: FastAPI):
             "ADDRESS not set — sync worker idle until configured"
         )
 
+    def _on_sync_settings_changed(keys, snap) -> None:
+        # Apply ADDRESS / ENABLE_SCHEDULED_SYNC at runtime — these
+        # are not restart-required keys, so the settings UI reports
+        # them as applied; previously they did nothing until reboot.
+        worker = app.state.sync_worker
+        action = _sync_worker_action(keys, snap)
+        if action == "start" and not worker._is_running():
+            log.info("settings change: starting sync worker")
+            worker.start()
+        elif action == "stop" and worker._is_running():
+            log.info("settings change: stopping sync worker")
+            asyncio.create_task(worker.stop())
+
+    provider.subscribe(_on_sync_settings_changed)
+
     app.state.mqtt = MqttService(
         db=app.state.db,
         provider=provider,
@@ -219,11 +264,6 @@ async def lifespan(app: FastAPI):
     )
     if s.mqtt_enabled and s.mqtt_host:
         app.state.mqtt.start()
-
-    # Track current discovery/node so on_settings_changed can publish
-    # cleanup deletes against the *old* topology when those change.
-    app.state.mqtt._last_node_id = s.mqtt_node_id
-    app.state.mqtt._last_discovery_prefix = s.mqtt_discovery_prefix
 
     def _on_mqtt_settings_change(keys, snap):
         # Scheduled on the running loop so async work executes safely.

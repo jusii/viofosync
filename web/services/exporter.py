@@ -124,6 +124,52 @@ def reconcile_orphan_jobs(db: Database) -> int:
         return cur.rowcount
 
 
+# How far before clip_start a source clip may begin and still overlap
+# a switched export's window (clips run 1–5 min; 10 min is generous).
+_SWITCHED_PROTECT_MARGIN_S = 600
+
+
+def export_protect_ids(db: Database) -> frozenset[int]:
+    """Clip ids that pending/active export jobs will read.
+
+    Retention passes this as ``protect_ids`` so the sweep can't
+    delete a source file mid-render (multi-segment jobs open inputs
+    per segment — a vanished clip fails the job with ENOENT).
+    join/pip jobs name their clips outright; switched jobs resolve
+    clips at run time by channel + time, so those are protected by
+    timestamp range with a one-clip margin before the window.
+    """
+    ids: set[int] = set()
+    if db is None:  # tests run the sync worker without a DB
+        return frozenset()
+    with db.conn() as c:
+        rows = c.execute(
+            "SELECT clip_ids, clip_start, clip_end FROM export_jobs "
+            "WHERE state IN ('queued', 'running', 'paused')"
+        ).fetchall()
+        for r in rows:
+            try:
+                payload = json.loads(r["clip_ids"] or "null")
+            except ValueError:
+                continue
+            if isinstance(payload, dict) and payload.get("clip_ids"):
+                ids.update(int(i) for i in payload["clip_ids"])
+                continue
+            if isinstance(payload, list):
+                ids.update(int(i) for i in payload)
+                continue
+            # Switched job: protect everything overlapping its window.
+            if r["clip_start"] is not None and r["clip_end"] is not None:
+                hits = c.execute(
+                    "SELECT id FROM clip_index "
+                    "WHERE timestamp BETWEEN ? AND ?",
+                    (r["clip_start"] - _SWITCHED_PROTECT_MARGIN_S,
+                     r["clip_end"]),
+                ).fetchall()
+                ids.update(h["id"] for h in hits)
+    return frozenset(ids)
+
+
 def ffmpeg_available() -> bool:
     return shutil.which("ffmpeg") is not None
 

@@ -15,6 +15,28 @@ import contextlib
 import os
 import shutil
 
+_TIMEOUT_S = 15.0
+_MAX_CONCURRENCY = 3
+
+# Per-event-loop semaphore (same pattern as filmstrip.py): a
+# module-level Semaphore binds to whichever loop first touches it,
+# which breaks pytest's function-scoped loops.
+_sems: dict[asyncio.AbstractEventLoop, asyncio.Semaphore] = {}
+
+
+def _semaphore() -> asyncio.Semaphore:
+    loop = asyncio.get_running_loop()
+    sem = _sems.get(loop)
+    if sem is None:
+        sem = asyncio.Semaphore(_MAX_CONCURRENCY)
+        _sems[loop] = sem
+    return sem
+
+
+def _discard(path: str) -> None:
+    with contextlib.suppress(OSError):
+        os.remove(path)
+
 
 def _cache_dir(recordings: str) -> str:
     d = os.path.join(recordings, ".thumbs")
@@ -78,31 +100,46 @@ async def ensure_thumb(
     if ffmpeg is None:
         return None
 
-    # Seek to 1s (skip the frequently-black first frame) and
-    # grab one frame scaled to 320 wide.
-    proc = await asyncio.create_subprocess_exec(
-        ffmpeg,
-        "-loglevel", "error",
-        "-y",
-        "-ss", "1",
-        "-i", video_path,
-        "-frames:v", "1",
-        "-vf", "scale=320:-1",
-        out,
-        stdout=asyncio.subprocess.DEVNULL,
-        stderr=asyncio.subprocess.DEVNULL,
-    )
-    try:
-        await asyncio.wait_for(proc.wait(), timeout=15.0)
-    except TimeoutError:   # asyncio.TimeoutError is the builtin since 3.11
-        proc.kill()
-        with contextlib.suppress(Exception):
-            await proc.wait()   # reap the killed child (no zombie)
-        mark_failed(recordings, clip_id)
-        return None
+    # ffmpeg writes to a temp name; only a verified result is renamed
+    # onto the cache path. Writing the final path directly meant a
+    # killed/timed-out job left a partial JPEG that the cache check
+    # above then served forever. The semaphore caps concurrent ffmpeg
+    # spawns — a 100-clip day view used to launch 100 at once.
+    tmp = f"{out}.part.jpg"
+    async with _semaphore():
+        # Re-check after waiting: a concurrent request for the same
+        # clip may have produced the thumb while we queued.
+        if os.path.exists(out) and os.path.getsize(out) > 0:
+            return out
+        # Seek to 1s (skip the frequently-black first frame) and
+        # grab one frame scaled to 320 wide.
+        proc = await asyncio.create_subprocess_exec(
+            ffmpeg,
+            "-loglevel", "error",
+            "-y",
+            "-ss", "1",
+            "-i", video_path,
+            "-frames:v", "1",
+            "-vf", "scale=320:-1",
+            tmp,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=_TIMEOUT_S)
+        except TimeoutError:  # asyncio.TimeoutError is the builtin since 3.11
+            proc.kill()
+            with contextlib.suppress(Exception):
+                await proc.wait()   # reap the killed child (no zombie)
+            _discard(tmp)
+            mark_failed(recordings, clip_id)
+            return None
 
-    if proc.returncode != 0 or not os.path.exists(out):
-        mark_failed(recordings, clip_id)
-        return None
+        if (proc.returncode != 0 or not os.path.exists(tmp)
+                or os.path.getsize(tmp) == 0):
+            _discard(tmp)
+            mark_failed(recordings, clip_id)
+            return None
+        os.replace(tmp, out)
     _clear_failed(recordings, clip_id)
     return out
