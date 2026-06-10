@@ -1,5 +1,38 @@
 # Changelog
 
+## v2.3 — 2026-06-10
+
+### Added
+
+#### Timeline Video Editor
+
+A multi-camera timeline editor for the archive: scrub the front/rear channels on a shared playhead with per-clip filmstrips, set in/out trim points, and cut between cameras to export a single switched-angle video. Includes frame-accurate keyboard shortcuts. Join, picture-in-picture, and switched exports are now hardware-accelerated via Intel QuickSync where available, with VAAPI and software fallbacks.
+
+#### Export Jobs
+
+- Animated filmstrip preview on each job — hover to scrub through the finished video.
+- Click a job's thumbnail to play the export in the viewer.
+- Output **Length** and **Size** columns in the jobs table.
+- Switched-camera exports now carry one continuous front-camera audio track, removing the audible jump at each camera switch.
+
+### Changed
+
+- Base image moved to Debian + jellyfin-ffmpeg to unlock QuickSync on Intel iGPUs; VAAPI and software remain as fallbacks, so a host without a working iGPU degrades transparently.
+- Archive updates live on a clip-indexed push instead of per-client polling, and the per-day GPS route aggregation is cached.
+- UI polish: background dither, clearer labels, and archive view state that persists across navigation.
+
+### Fixed
+
+A broad reliability and security hardening pass (full per-item detail in `CLAUDE.md`):
+
+- **Worker lifecycle** — sync and export workers now shut down within a bounded timeout, and an in-flight or paused ffmpeg export is no longer left running after stop. Changing the dashcam address or toggling scheduled sync starts and stops the worker at runtime, without a restart.
+- **Responsiveness** — NAS directory walks, SQLite transactions, and the quota disk-usage scan run off the event loop, so a slow or busy recordings volume no longer freezes the UI and live updates.
+- **Data safety** — manual-import staging recovers completed clips after a crash instead of deleting them; downloads that fail their size check are rejected rather than archived truncated; corrupt or truncated MP4s no longer spin a worker at 100% CPU; and partial thumbnails, filmstrips, or exports can't be served from cache or left to count against the quota.
+- **Disk full** — a full recordings volume raises a sticky "disk full" sync error and pauses the queue, instead of marking every clip failed.
+- **MQTT** — reconnect backoff resets after a stable connection, retained discovery configs are cleaned up on the first node-id/prefix change, and timed-out probes are reaped.
+- **Security** — clip filenames and geocoded place names are HTML-escaped before display; the live-events WebSocket rejects cross-origin handshakes; the MQTT broker password is no longer returned by the settings API; and retention will not delete a clip while an export is reading it.
+- Queue counters update immediately after the Prioritise and Retry actions.
+
 ## v2.2 — 2026-06-06
 
 ### Added

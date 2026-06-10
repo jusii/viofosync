@@ -331,7 +331,7 @@ def create_app() -> FastAPI:
 
     app = FastAPI(
         title="Viofosync",
-        version="2.2",
+        version="2.3",
         lifespan=lifespan,
         docs_url=None,       # no swagger in prod build
         redoc_url=None,
