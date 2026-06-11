@@ -1,8 +1,6 @@
 # viofosync
 
-![CI](https://github.com/RobXYZ/viofosync/actions/workflows/ci.yml/badge.svg)  
-![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)  
-![Docker](https://img.shields.io/docker/pulls/robxyz/viofosync)
+![CI](https://github.com/RobXYZ/viofosync/actions/workflows/ci.yml/badge.svg) ![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg) ![Docker](https://img.shields.io/docker/pulls/robxyz/viofosync)
 
 Self-hosted web app for syncing, browsing, and exporting recordings from a Viofo dashcam (tested with the A229 Pro) over Wi-Fi. Runs as a single Docker container on a NAS or any always-on host on the same network as the dashcam.
 
@@ -32,13 +30,16 @@ Self-hosted web app for syncing, browsing, and exporting recordings from a Viofo
 
 ## Getting started
 
-### Hardware
+### Requirements
 
-> [!IMPORTANT]
-> The dashcam must stay powered on and connected to Wi-Fi. A hardwire kit (e.g. Viofo HK4) plus a dedicated dashcam battery is recommended.
-> It should join your LAN in Wi-Fi **station** mode. As of May 2026 the official A229 Pro firmware does not retain Wi-Fi state across reboots but  
-> Viofo support will provide a custom firmware on request.
-> Reserve the dashcam's IP on your router so it doesn't change.
+> [!NOTE]
+> #### Most users will need
+> - **Viofo Wi-Fi dashcam** connected to your LAN in station mode
+> - **Viofo special firmware** to keep station mode always-on (supplied by Viofo support on request)
+> - **Hardwire kit** (Viofo HK4) to keep the camera powered when parked - a dedicated dashcam battery is recommended for extended downloads
+> - **Reserved IP** for the dashcam on your router, so it doesn't change
+> - **NAS or always-on host** with large storage that can run Docker
+> - **Optional: hardware video encoder + fast LAN** - recommended for the video editing features
 
 ### Quick start
 
