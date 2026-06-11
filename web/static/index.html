@@ -125,6 +125,33 @@
                     aria-label="Picture-in-picture, rear main"
                     title="Picture-in-picture, rear main">Rf</button>
           </div>
+          <!-- Third-camera (telephoto / interior) groups: hidden
+               unless the selection's day contains that camera, so
+               2-camera setups see the original bar unchanged. -->
+          <div class="action-group" id="actions-tele" hidden>
+            <span class="action-label">Tele:</span>
+            <button type="button" id="dl-orig-tele"
+                    aria-label="Download selected telephoto originals"
+                    title="Download selected telephoto originals">T</button>
+            <button type="button" id="export-join-tele"
+                    aria-label="Join selected telephoto clips"
+                    title="Join selected telephoto clips">Join</button>
+            <button type="button" id="export-pip-tele"
+                    aria-label="Picture-in-picture, telephoto main"
+                    title="Picture-in-picture, telephoto main">Tf</button>
+          </div>
+          <div class="action-group" id="actions-interior" hidden>
+            <span class="action-label">Interior:</span>
+            <button type="button" id="dl-orig-interior"
+                    aria-label="Download selected interior originals"
+                    title="Download selected interior originals">I</button>
+            <button type="button" id="export-join-interior"
+                    aria-label="Join selected interior clips"
+                    title="Join selected interior clips">Join</button>
+            <button type="button" id="export-pip-interior"
+                    aria-label="Picture-in-picture, interior main"
+                    title="Picture-in-picture, interior main">If</button>
+          </div>
           <button type="button" id="clear-selection">Clear selected clips</button>
         </div>
         <div id="exports-panel" class="exports-panel" hidden>
@@ -269,7 +296,7 @@
         <div id="modal-body"></div>
         <div class="modal-nav">
           <button type="button" id="modal-prev" title="Previous clip (←)">← Prev</button>
-          <button type="button" id="modal-toggle" title="Switch camera (F)">Rear view</button>
+          <button type="button" id="modal-toggle" title="Cycle camera (F)">Rear view</button>
           <button type="button" id="modal-next" title="Next clip (→)">Next →</button>
           <label class="modal-autoplay"
                  title="Play the next clip automatically when this one ends">
@@ -309,8 +336,8 @@
               <line x1="12" y1="3" x2="12" y2="15"/>
             </svg>
             <span class="dropzone-title">Drag a folder here, or click to browse</span>
-            <span class="dropzone-hint">Front &amp; rear <code>.MP4</code> files are
-              recognised automatically</span>
+            <span class="dropzone-hint">Front, rear, telephoto &amp; interior
+              <code>.MP4</code> files are recognised automatically</span>
           </label>
           <div id="import-upload-manifest" class="manifest"></div>
           <button id="import-upload-go" class="btn primary" disabled>Import</button>
