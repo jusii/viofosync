@@ -1109,8 +1109,9 @@ function updateArchiveActions() {
   document.getElementById("export-pip-front").disabled = !hasPair;
   document.getElementById("export-pip-rear").disabled = !hasPair;
   // Third-camera (tele / interior) actions: the whole button group
-  // stays hidden unless that camera appears in the day's data, so
-  // 2-camera setups see the original action bar unchanged.
+  // stays hidden until the selection contains a clip from that
+  // camera, so 2-camera setups see the original action bar
+  // unchanged.
   const camGroup = (cam, present, dl, join, pip, pipOk) => {
     const group = document.getElementById(`actions-${cam}`);
     if (!group) return;

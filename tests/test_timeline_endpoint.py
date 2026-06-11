@@ -93,8 +93,10 @@ def test_timeline_day_mode_channels_clips_bounds(logged_in_client):
 
 
 def test_timeline_third_camera_channels(logged_in_client):
-    """A 3-camera day (here telephoto) exposes a third channel,
-    ordered after rear. Interior would slot in the same way."""
+    """Tele and interior clips each get their own channel, in
+    CHANNEL_ORDER after rear. A real device has only one of the
+    two, but the endpoint must order any mix it finds — e.g. an
+    archive that spans both a telephoto and an interior setup."""
     app = logged_in_client.app
     _insert_clip(app, 1, 1_717_312_440, "F", 60.0)
     _insert_clip(app, 2, 1_717_312_440, "R", 60.0)
