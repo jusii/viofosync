@@ -575,7 +575,12 @@ main {
 .clip-pair .time label { flex: 1 1 auto; }
 .clip-pair .time .kind-badge { font-weight: 500; }
 .clip-pair .thumbs {
-  display: grid; grid-template-columns: 1fr 1fr; gap: 4px;
+  /* auto-fit yields 2 equal columns for F+R days and 3 for
+     3-camera (F+R+T/I) days; the 80px floor keeps thumbs from
+     collapsing to icon size on narrow viewports. */
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(80px, 1fr));
+  gap: 4px;
   margin: 6px 0;
 }
 .clip-pair img {
@@ -946,6 +951,14 @@ main {
 .kind-badge.kind-R {
   color: oklch(0.76 0.10 200);
   border-color: oklch(0.50 0.08 200);
+}
+/* Third camera (telephoto or interior — never both on one device)
+ * shares a magenta clear of ok-green 145, rear-teal 200, accent,
+ * warn and err hues. */
+.kind-badge.kind-T,
+.kind-badge.kind-I {
+  color: oklch(0.76 0.11 315);
+  border-color: oklch(0.52 0.09 315);
 }
 .kind-badge.kind-parking { color: var(--warn); border-color: var(--warn); }
 .kind-badge.kind-event { color: var(--err-text); border-color: var(--err); }

@@ -19,7 +19,7 @@ const state = {
   queueSelected: new Set(),// filenames ticked
   filters: { driving: true, parking: true, ro: true },
   showMaps: localStorage.getItem("vfs.showMaps") !== "0",
-  archiveSelected: new Map(),  // pair_id → { ts, front, rear }
+  archiveSelected: new Map(),  // pair_id → { ts, front, rear, tele, interior }
   archiveExpanded: new Set(),  // open archive day keys ("YYYY-MM-DD"); persists
                                // open days across in-app navigation (re-render)
   map: null,
@@ -983,7 +983,11 @@ function renderClipPair(pair) {
       <label><input type="checkbox" data-pair="${pair.timestamp}_${pair.sequence}" /> ${time}</label>
       ${kindBadge}
     </div>
-    <div class="thumbs">${thumb(pair.front, "F")}${thumb(pair.rear, "R")}</div>
+    <div class="thumbs">${thumb(pair.front, "F")}${thumb(pair.rear, "R")}${
+      // Third camera (telephoto or interior) renders only when
+      // present so 2-camera days keep their familiar two columns.
+      pair.tele ? thumb(pair.tele, "T") : ""
+    }${pair.interior ? thumb(pair.interior, "I") : ""}</div>
   `;
   el.querySelectorAll(".thumb img").forEach((img) => {
     img.addEventListener("click", (e) => {
@@ -1000,14 +1004,16 @@ function renderClipPair(pair) {
   if (state.archiveSelected.has(pairId)) cb.checked = true;
   cb.addEventListener("change", () => {
     if (cb.checked) {
-      const front = el.querySelector('.thumb[data-camera="F"]');
-      const rear = el.querySelector('.thumb[data-camera="R"]');
+      const clipId = (cam) => {
+        const t = el.querySelector(`.thumb[data-camera="${cam}"]`);
+        return t && t.dataset.clipId ? Number(t.dataset.clipId) : null;
+      };
       state.archiveSelected.set(pairId, {
         ts: Number(el.dataset.ts),
-        front: front && front.dataset.clipId
-          ? Number(front.dataset.clipId) : null,
-        rear: rear && rear.dataset.clipId
-          ? Number(rear.dataset.clipId) : null,
+        front: clipId("F"),
+        rear: clipId("R"),
+        tele: clipId("T"),
+        interior: clipId("I"),
       });
     } else {
       state.archiveSelected.delete(pairId);
@@ -1085,10 +1091,15 @@ function updateArchiveActions() {
     bar.classList.add("has-selection");
   }
   let fronts = 0, rears = 0, both = 0;
+  let teles = 0, interiors = 0, frontTele = 0, frontInterior = 0;
   for (const v of state.archiveSelected.values()) {
     if (v.front) fronts++;
     if (v.rear) rears++;
     if (v.front && v.rear) both++;
+    if (v.tele) teles++;
+    if (v.interior) interiors++;
+    if (v.front && v.tele) frontTele++;
+    if (v.front && v.interior) frontInterior++;
   }
   const hasFront = fronts > 0, hasRear = rears > 0, hasPair = both > 0;
   document.getElementById("dl-orig-front").disabled = !hasFront;
@@ -1097,6 +1108,28 @@ function updateArchiveActions() {
   document.getElementById("export-join-rear").disabled = !hasRear;
   document.getElementById("export-pip-front").disabled = !hasPair;
   document.getElementById("export-pip-rear").disabled = !hasPair;
+  // Third-camera (tele / interior) actions: the whole button group
+  // stays hidden unless that camera appears in the day's data, so
+  // 2-camera setups see the original action bar unchanged.
+  const camGroup = (cam, present, dl, join, pip, pipOk) => {
+    const group = document.getElementById(`actions-${cam}`);
+    if (!group) return;
+    group.hidden = !present;
+    if (!present) return;
+    document.getElementById(dl).disabled = !present;
+    document.getElementById(join).disabled = !present;
+    document.getElementById(pip).disabled = !pipOk;
+  };
+  camGroup(
+    "tele", teles > 0,
+    "dl-orig-tele", "export-join-tele", "export-pip-tele",
+    frontTele > 0,
+  );
+  camGroup(
+    "interior", interiors > 0,
+    "dl-orig-interior", "export-join-interior",
+    "export-pip-interior", frontInterior > 0,
+  );
   document.getElementById("clear-selection").disabled = n === 0;
 }
 
@@ -1116,7 +1149,8 @@ function clearSelection() {
 }
 
 function downloadOriginals(slot) {
-  // slot: "front" | "rear". Download each selected original clip
+  // slot: "front" | "rear" | "tele" | "interior". Download each
+  // selected original clip
   // as its own file (no ZIP). The clip stream endpoint sends
   // Content-Disposition: attachment with the dashcam basename, so
   // a same-origin anchor click triggers a named download. Stagger
@@ -1126,8 +1160,7 @@ function downloadOriginals(slot) {
   // doesn't take ages to fire.
   const ids = [];
   for (const v of state.archiveSelected.values()) {
-    if (slot === "front" && v.front) ids.push(v.front);
-    else if (slot === "rear" && v.rear) ids.push(v.rear);
+    if (v[slot]) ids.push(v[slot]);
   }
   if (!ids.length) return;
   ids.forEach((id, i) => {
@@ -1148,9 +1181,18 @@ async function submitExport(type) {
   for (const v of state.archiveSelected.values()) {
     if (type === "join_front" && v.front) ids.push(v.front);
     else if (type === "join_rear" && v.rear) ids.push(v.rear);
-    else if (type === "pip" || type === "pip_rear") {
+    else if (type === "join_tele" && v.tele) ids.push(v.tele);
+    else if (type === "join_interior" && v.interior) {
+      ids.push(v.interior);
+    } else if (type === "pip" || type === "pip_rear") {
       if (v.front) ids.push(v.front);
       if (v.rear) ids.push(v.rear);
+    } else if (type === "pip_tele") {
+      if (v.front) ids.push(v.front);
+      if (v.tele) ids.push(v.tele);
+    } else if (type === "pip_interior") {
+      if (v.front) ids.push(v.front);
+      if (v.interior) ids.push(v.interior);
     }
   }
   if (!ids.length) return;
@@ -1224,6 +1266,18 @@ document.getElementById("export-pip-front")
   .addEventListener("click", () => submitExport("pip"));
 document.getElementById("export-pip-rear")
   .addEventListener("click", () => submitExport("pip_rear"));
+document.getElementById("dl-orig-tele")
+  .addEventListener("click", () => downloadOriginals("tele"));
+document.getElementById("export-join-tele")
+  .addEventListener("click", () => submitExport("join_tele"));
+document.getElementById("export-pip-tele")
+  .addEventListener("click", () => submitExport("pip_tele"));
+document.getElementById("dl-orig-interior")
+  .addEventListener("click", () => downloadOriginals("interior"));
+document.getElementById("export-join-interior")
+  .addEventListener("click", () => submitExport("join_interior"));
+document.getElementById("export-pip-interior")
+  .addEventListener("click", () => submitExport("pip_interior"));
 document.getElementById("clear-selection")
   .addEventListener("click", clearSelection);
 
@@ -1316,8 +1370,12 @@ function toast(message, opts = {}) {
 const EXPORT_TYPE_LABELS = {
   join_front: "Join Front",
   join_rear: "Join Rear",
+  join_tele: "Join Tele",
+  join_interior: "Join Interior",
   pip: "PiP Fr",
   pip_rear: "PiP Rf",
+  pip_tele: "PiP Tf",
+  pip_interior: "PiP If",
   timeline: "Timeline",
 };
 
@@ -1545,20 +1603,27 @@ function renderExportJobs(jobs) {
 
 // ---------- Video modal + nav ----------
 
+// Camera letters in modal cycle order. Only F+R plus one of T
+// (telephoto) or I (interior) exist on any single device, but
+// keeping all four here costs nothing — absent cameras have empty
+// timelines and the cycle skips them.
+const MODAL_CAMERAS = ["F", "R", "T", "I"];
+
 function buildCameraTimelines(scopeEl) {
   const root = scopeEl || document.getElementById("view-archive");
-  const F = [], R = [];
+  const timelines = { F: [], R: [], T: [], I: [] };
   root.querySelectorAll(".thumb[data-clip-id]").forEach((el) => {
     const entry = {
       id: Number(el.dataset.clipId),
       ts: Number(el.dataset.ts),
       el,
     };
-    (el.dataset.camera === "F" ? F : R).push(entry);
+    (timelines[el.dataset.camera] || timelines.F).push(entry);
   });
-  F.sort((a, b) => a.ts - b.ts);
-  R.sort((a, b) => a.ts - b.ts);
-  return { F, R };
+  for (const cam of MODAL_CAMERAS) {
+    timelines[cam].sort((a, b) => a.ts - b.ts);
+  }
+  return timelines;
 }
 
 function openVideo(clipId, camera, sourceEl, opts = {}) {
@@ -1613,13 +1678,30 @@ function updateModalNav() {
   prev.disabled = i <= 0;
   next.disabled = i < 0 || i >= list.length - 1;
 
-  const other = mc.camera === "F" ? "R" : "F";
   const curr = list[i];
-  const match = curr
-    ? mc.timelines[other].find((e) => e.ts === curr.ts)
-    : null;
-  toggle.disabled = !match;
-  toggle.textContent = other === "R" ? "Rear view" : "Front view";
+  const next_ = curr ? nextCameraClip(mc, curr.ts) : null;
+  toggle.disabled = !next_;
+  if (next_) {
+    toggle.textContent = `${CAMERA_VIEW_LABELS[next_.camera]} view`;
+  }
+}
+
+const CAMERA_VIEW_LABELS = {
+  F: "Front", R: "Rear", T: "Tele", I: "Interior",
+};
+
+// The next camera (cycling F→R→T→I→F) that has a clip at ``ts``,
+// or null when the current camera is the only one — the cycle
+// skips cameras with no same-timestamp clip, so a 2-cam day
+// behaves exactly like the old binary toggle.
+function nextCameraClip(mc, ts) {
+  const start = MODAL_CAMERAS.indexOf(mc.camera);
+  for (let step = 1; step < MODAL_CAMERAS.length; step++) {
+    const cam = MODAL_CAMERAS[(start + step) % MODAL_CAMERAS.length];
+    const match = mc.timelines[cam].find((e) => e.ts === ts);
+    if (match) return { camera: cam, clip: match };
+  }
+  return null;
 }
 
 function stepVideo(delta) {
@@ -1635,17 +1717,16 @@ function stepVideo(delta) {
 function toggleVideoCamera() {
   const mc = state.modalClip;
   if (!mc) return;
-  const other = mc.camera === "F" ? "R" : "F";
   const curr = mc.timelines[mc.camera].find((e) => e.id === mc.id);
   if (!curr) return;
-  const match = mc.timelines[other].find((e) => e.ts === curr.ts);
-  if (!match) return;
+  const next = nextCameraClip(mc, curr.ts);
+  if (!next) return;
   // Preserve current playback position and pause state so the
   // other camera picks up where this one was.
   const video = document.querySelector("#modal-body video");
   const seekTo = video ? video.currentTime : 0;
   const autoplay = video ? !video.paused : true;
-  openVideo(match.id, other, match.el, { seekTo, autoplay });
+  openVideo(next.clip.id, next.camera, next.clip.el, { seekTo, autoplay });
 }
 
 function closeModal() {
@@ -1795,7 +1876,12 @@ function renderQueue() {
 function renderKindBadge(it) {
   const cam = it.kind_camera || it.camera || "";
   const evt = it.kind_event || "";
-  const camLabel = cam === "F" ? "Front" : cam === "R" ? "Rear" : "?";
+  const camLabel =
+    cam === "F" ? "Front"
+    : cam === "R" ? "Rear"
+    : cam === "T" ? "Tele"
+    : cam === "I" ? "Interior"
+    : "?";
   const parts = [`<span class="kind-badge kind-${escHtml(cam)}">${camLabel}</span>`];
   if (evt === "parking") {
     parts.push(`<span class="kind-badge kind-parking">Parking</span>`);
