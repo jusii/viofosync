@@ -55,14 +55,17 @@ def _resolve_default_encoder(app_state) -> str:
 
 
 class Segment(BaseModel):
-    channel: str = Field(pattern="^(front|rear|interior|other)$")
+    channel: str = Field(pattern="^(front|rear|tele|interior|other)$")
     start_ts: float
     end_ts: float
 
 
 class CreateExport(BaseModel):
     type: str = Field(
-        pattern="^(join_front|join_rear|pip|pip_rear|timeline)$"
+        pattern=(
+            "^(join_front|join_rear|join_tele|join_interior"
+            "|pip|pip_rear|pip_tele|pip_interior|timeline)$"
+        )
     )
     clip_ids: List[int] = []
     segments: list[Segment] | None = None

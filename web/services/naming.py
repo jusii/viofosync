@@ -24,8 +24,12 @@ from typing import List
 LABEL_FOR_TYPE = {
     "join_front": "front",
     "join_rear": "rear",
-    "pip": "pip-front",       # front-main PiP
-    "pip_rear": "pip-rear",   # rear-main PiP
+    "join_tele": "tele",
+    "join_interior": "interior",
+    "pip": "pip-front",               # front-main PiP
+    "pip_rear": "pip-rear",           # rear-main PiP
+    "pip_tele": "pip-tele",           # tele-main + front inset
+    "pip_interior": "pip-interior",   # interior-main + front inset
 }
 
 
@@ -91,16 +95,23 @@ def export_download_name(
 # --- Timeline camera channels -------------------------------------------
 
 # The lens is the trailing letter of a clip's ``camera`` code:
-# F / PF (parking) / EF (event) -> front; R / PR -> rear; a future
-# interior lens is I. Anything else falls back to "other" so an
+# F / PF (parking) / EF (event) -> front; R / PR -> rear;
+# T -> telephoto; I -> interior. 3-channel models pair F+R with
+# either T or I. Anything else falls back to "other" so an
 # unexpected code still gets its own track rather than vanishing.
-_CHANNEL_FOR_LETTER = {"F": "front", "R": "rear", "I": "interior"}
+_CHANNEL_FOR_LETTER = {
+    "F": "front",
+    "R": "rear",
+    "T": "tele",
+    "I": "interior",
+}
 
 # Stable display order for channel tracks, and human labels.
-CHANNEL_ORDER = ["front", "rear", "interior", "other"]
+CHANNEL_ORDER = ["front", "rear", "tele", "interior", "other"]
 CHANNEL_LABELS = {
     "front": "Front",
     "rear": "Rear",
+    "tele": "Tele",
     "interior": "Interior",
     "other": "Other",
 }

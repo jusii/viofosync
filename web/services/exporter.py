@@ -391,19 +391,21 @@ def _pip_filter_complex(
 ) -> str:
     """Build the -filter_complex argument for the PiP overlay.
 
-    ffmpeg input 0 is the front clip, input 1 is the rear clip.
-    ``main`` chooses which is the fullscreen base layer; the other
-    is scaled to 1/4 size and overlaid. ``main="front"`` (default)
-    reproduces the original front-fullscreen behaviour. Unknown
-    ``position`` values fall back to ``top_right`` so a typo
-    doesn't break ffmpeg invocation entirely.
+    ffmpeg input 0 is the front clip, input 1 is the partner clip
+    (rear, tele or interior). ``main`` chooses which is the
+    fullscreen base layer; the other is scaled to 1/4 size and
+    overlaid. ``main="front"`` (default) reproduces the original
+    front-fullscreen behaviour; any other value (rear / tele /
+    interior) makes the partner fullscreen with the front inset.
+    Unknown ``position`` values fall back to ``top_right`` so a
+    typo doesn't break ffmpeg invocation entirely.
     """
     coords = _PIP_OVERLAY_COORDS.get(
         position, _PIP_OVERLAY_COORDS["top_right"],
     )
-    # Only "front" / "rear" are ever passed (derived from the job
-    # type); anything else falls through to rear-main rather than
-    # erroring, matching the lenient position handling above.
+    # ``main`` is derived from the job type (front / rear / tele /
+    # interior); anything that isn't "front" means partner-main,
+    # matching the lenient position handling above.
     base, inset = ("0", "1") if main == "front" else ("1", "0")
     if encoder == "qsv":
         # GPU composition: scale_qsv shrinks the inset, overlay_qsv composes
@@ -617,7 +619,10 @@ class ExportWorker:
     ) -> int:
         if not ffmpeg_available():
             raise RuntimeError("ffmpeg not installed on this host")
-        if job_type not in ("join_front", "join_rear", "pip", "pip_rear"):
+        if job_type not in (
+            "join_front", "join_rear", "join_tele", "join_interior",
+            "pip", "pip_rear", "pip_tele", "pip_interior",
+        ):
             raise ValueError(f"unknown job type: {job_type}")
         if not clip_ids:
             raise ValueError("no clips selected")
@@ -888,8 +893,14 @@ class ExportWorker:
 
         clips = self._fetch_clips(clip_ids)
 
-        if job["type"] in ("join_front", "join_rear"):
-            wanted = "F" if job["type"] == "join_front" else "R"
+        join_wanted = {
+            "join_front": "F",
+            "join_rear": "R",
+            "join_tele": "T",
+            "join_interior": "I",
+        }
+        if job["type"] in join_wanted:
+            wanted = join_wanted[job["type"]]
             # ``camera`` may be ``F``, ``R``, ``PF``, ``PR``, etc.
             # The last letter identifies the lens.
             selected = [
@@ -903,38 +914,57 @@ class ExportWorker:
                 )
                 return
             await self._concat(job["id"], selected, out)
-        else:  # pip / pip_rear
-            pairs = self._pair_clips(clips)
+        else:  # pip / pip_rear / pip_tele / pip_interior
+            # The PiP partner is the non-front camera; ``main``
+            # chooses which side is fullscreen. Front is always
+            # ffmpeg input 0 (it carries the mic audio).
+            partner = {
+                "pip_tele": "tele",
+                "pip_interior": "interior",
+            }.get(job["type"], "rear")
+            pairs = self._pair_clips(
+                clips, required=("front", partner),
+            )
             if not pairs:
                 self._finish(
                     job["id"], False,
-                    "no front+rear pairs in selection", None,
+                    f"no front+{partner} pairs in selection", None,
                 )
                 return
-            main = "rear" if job["type"] == "pip_rear" else "front"
+            main = {
+                "pip_rear": "rear",
+                "pip_tele": "tele",
+                "pip_interior": "interior",
+            }.get(job["type"], "front")
             await self._pip(
                 job["id"], pairs, out, encoder,
-                snap.pip_position, main=main,
+                snap.pip_position, main=main, partner=partner,
             )
 
     # ---- ffmpeg invocations ----
 
     @staticmethod
-    def _pair_clips(clips: List[dict]):
-        # Viofo gives F and R from the same capture identical
-        # timestamps but consecutive sequences, so key on
-        # (timestamp, event_type) and pick the slot from the
-        # trailing letter of ``camera`` (handles PF/PR too).
+    def _pair_clips(
+        clips: List[dict],
+        required: tuple = ("front", "rear"),
+    ):
+        # Viofo gives same-capture clips identical timestamps but
+        # consecutive sequences, so key on (timestamp, event_type)
+        # and pick the slot from the trailing letter of ``camera``
+        # (handles PF/PR/PT/PI too). ``required`` names the slots
+        # a group must have to count as a complete pair.
         pairs: dict[tuple[int, str], dict] = {}
         for c in clips:
             cam = (c["camera"] or "").upper()
             kind = c.get("event_type") or "normal"
             key = (c["timestamp"], kind)
-            slot = "front" if cam.endswith("F") else "rear"
+            slot = {"F": "front", "T": "tele", "I": "interior"}.get(
+                cam[-1:], "rear"
+            )
             pairs.setdefault(key, {})[slot] = c
         return [
             p for p in sorted(pairs.items())
-            if "front" in p[1] and "rear" in p[1]
+            if all(s in p[1] for s in required)
         ]
 
     async def _concat(
@@ -986,8 +1016,14 @@ class ExportWorker:
         encoder: str = "software",
         position: str = "top_right",
         main: str = "front",
+        partner: str = "rear",
     ) -> None:
         """One ffmpeg per pair into a temp dir, then concat.
+
+        ``partner`` names the non-front slot in each pair (rear,
+        tele or interior). Front is always ffmpeg input 0 — it
+        carries the mic audio, and ``-c:a copy`` with no explicit
+        ``-map`` makes ffmpeg's default stream selection pick it.
 
         Broadcasts segment-level progress so the UI shows
         something meaningful even though each segment is a
@@ -1000,9 +1036,9 @@ class ExportWorker:
             for i, (_, p) in enumerate(pairs):
                 # Probe this segment's duration so the inner
                 # pump() can emit fine-grained progress instead
-                # of sitting silent for minutes. Front and rear of a
-                # Viofo pair share a duration, so the front clip is a
-                # fine reference even for rear-main (pip_rear).
+                # of sitting silent for minutes. All cameras of a
+                # Viofo capture share a duration, so the front clip
+                # is a fine reference even for partner-main jobs.
                 seg_dur = await self._probe_total(
                     [p["front"]]
                 )
@@ -1026,7 +1062,7 @@ class ExportWorker:
                         *_hw_decode_args(encoder),
                         "-i", p["front"]["path"],
                         *_hw_decode_args(encoder),
-                        "-i", p["rear"]["path"],
+                        "-i", p[partner]["path"],
                         # _with_upload appends hwupload for VAAPI only; for QSV
                         # the filter already yields GPU surfaces, so it's a no-op.
                         "-filter_complex",

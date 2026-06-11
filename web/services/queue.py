@@ -182,10 +182,12 @@ def reconcile(
 def _camera_from_filename(filename: str) -> Optional[str]:
     # Handles both ``…_0001F.MP4`` and ``…_0001PF.MP4`` /
     # ``…_0001EF.MP4`` — the optional prefix letter encodes the
-    # event type (P=parking, E=event).
+    # event type (P=parking, E=event). The camera letter is
+    # F=front, R=rear, T=telephoto, I=interior — 3-channel
+    # models pair F+R with either T or I.
     import re as _re
     m = _re.match(
-        r"^\d{4}_\d{4}_\d{6}_\d+[PE]?([FR])\.MP4$",
+        r"^\d{4}_\d{4}_\d{6}_\d+[PE]?([FRTI])\.MP4$",
         filename,
         _re.IGNORECASE,
     )
@@ -195,7 +197,7 @@ def _camera_from_filename(filename: str) -> Optional[str]:
 def _event_from_filename(filename: str) -> Optional[str]:
     import re as _re
     m = _re.match(
-        r"^\d{4}_\d{4}_\d{6}_\d+([PE])?[FR]\.MP4$",
+        r"^\d{4}_\d{4}_\d{6}_\d+([PE])?[FRTI]\.MP4$",
         filename,
         _re.IGNORECASE,
     )
@@ -208,7 +210,7 @@ def _event_from_filename(filename: str) -> Optional[str]:
 # SQL expressions for deriving camera / event type straight
 # from the filename. Used for filtering so we don't depend on
 # historical rows having ``camera`` / ``event_type`` populated.
-# Filenames end in ``…NNNNN[PE]?[FR].MP4`` — the camera letter
+# Filenames end in ``…NNNNN[PE]?[FRTI].MP4`` — the camera letter
 # is the character immediately before ``.MP4``, and the byte
 # before that is either a digit (normal) or P/E.
 _CAM_SQL = "upper(substr(filename, -5, 1))"

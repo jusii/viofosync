@@ -197,13 +197,19 @@ def get_day(
                 pass
         return True
 
-    # Pair front+rear by (timestamp, event_type). Viofo's F and R
-    # from one capture share a timestamp but get consecutive
-    # sequence numbers, so keying on sequence wouldn't pair them.
+    # Group cameras by (timestamp, event_type). Viofo clips from
+    # one capture share a timestamp but get consecutive sequence
+    # numbers, so keying on sequence wouldn't pair them.
     # event_type keeps parking (PF/PR) separate from normal (F/R).
     # Slot is picked from the last letter so PF/EF still = front.
+    # 3-channel models add either T (telephoto) or I (interior)
+    # alongside F+R.
     pairs: dict[tuple[int, str], dict] = defaultdict(
-        lambda: {"front": None, "rear": None, "sequence": None}
+        lambda: {
+            "front": None, "rear": None,
+            "tele": None, "interior": None,
+            "sequence": None,
+        }
     )
     for r in rows:
         if not _in_range(r["timestamp"]):
@@ -211,10 +217,12 @@ def get_day(
         cam = (r["camera"] or "").upper()
         kind = r["event_type"] or "normal"
         key = (r["timestamp"], kind)
-        slot = "front" if cam.endswith("F") else "rear"
+        slot = {"F": "front", "T": "tele", "I": "interior"}.get(
+            cam[-1:], "rear"
+        )
         pairs[key][slot] = dict(r)
         # Prefer the front sequence number for the pair; fall
-        # back to the rear's if there's no front clip.
+        # back to any other camera's if there's no front clip.
         if slot == "front" or pairs[key]["sequence"] is None:
             pairs[key]["sequence"] = r["sequence"]
 
@@ -228,6 +236,8 @@ def get_day(
             "iso": _dt.datetime.fromtimestamp(ts).isoformat(),
             "front": pair["front"],
             "rear": pair["rear"],
+            "tele": pair["tele"],
+            "interior": pair["interior"],
         })
 
     return {"date": date, "clips": clips}

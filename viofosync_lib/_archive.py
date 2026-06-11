@@ -30,11 +30,13 @@ group_name_globs = {
     "yearly": "[0-9][0-9][0-9][0-9]",
 }
 
-# Downloaded recording filename glob pattern.
+# Downloaded recording filename glob pattern. The trailing
+# letter is the camera: F=front, R=rear, T=telephoto,
+# I=interior.
 downloaded_filename_glob = (
     "[0-9][0-9][0-9][0-9]_[0-9][0-9][0-9][0-9]"
     "_[0-9][0-9][0-9][0-9][0-9][0-9]"
-    "_*[FR].MP4"
+    "_*[FRTI].MP4"
 )
 
 # Downloaded recording filename regular expression.
