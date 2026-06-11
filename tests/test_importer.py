@@ -13,6 +13,12 @@ def test_classify_event_type():
     assert importer.classify_event_type("F", "DCIM/Movie/RO/X.MP4") == "ro"
     # RO wins even for a parking-named clip living under /RO/.
     assert importer.classify_event_type("PF", "Movie/RO/X.MP4") == "ro"
+    # Third cameras: telephoto (T) and interior (I) classify the
+    # same way as front/rear.
+    assert importer.classify_event_type("T", "DCIM/Movie/X.MP4") == "normal"
+    assert importer.classify_event_type("PT", "DCIM/Parking/X.MP4") == "parking"
+    assert importer.classify_event_type("I", "DCIM/Movie/X.MP4") == "normal"
+    assert importer.classify_event_type("PI", "Movie/RO/X.MP4") == "ro"
 
 
 def test_scan_source_recurses_and_sorts_newest_first(tmp_path: Path):
@@ -20,22 +26,26 @@ def test_scan_source_recurses_and_sorts_newest_first(tmp_path: Path):
     root = tmp_path / "card"
     (root / "DCIM" / "Movie").mkdir(parents=True)
     (root / "DCIM" / "Movie" / "RO").mkdir()
-    # Recognised: one older normal front, one newer locked front.
+    # Recognised: one older normal front, one newer locked front,
+    # and a telephoto clip from a 3-camera model.
     (root / "DCIM" / "Movie" / "2026_0101_080000_0001F.MP4").write_bytes(b"a" * 10)
     (root / "DCIM" / "Movie" / "RO" / "2026_0102_090000_0002F.MP4").write_bytes(b"b" * 20)
+    (root / "DCIM" / "Movie" / "2026_0101_081000_0003T.MP4").write_bytes(b"t" * 7)
     # Junk: ignored + reported.
     (root / "DCIM" / "Movie" / "notes.txt").write_text("hi")
     # Matches the filename regex but has an impossible date -> bad_timestamp.
     (root / "DCIM" / "Movie" / "2026_1399_250000_0009F.MP4").write_bytes(b"c" * 5)
 
     manifest = importer.scan_source(str(root))
-    assert manifest.total_bytes == 30
+    assert manifest.total_bytes == 37
     assert [it.basename for it in manifest.items] == [
         "2026_0102_090000_0002F.MP4",   # newest first
+        "2026_0101_081000_0003T.MP4",
         "2026_0101_080000_0001F.MP4",
     ]
     assert manifest.items[0].event_type == "ro"
-    assert manifest.items[1].event_type == "normal"
+    assert manifest.items[1].event_type == "normal"   # the T clip
+    assert manifest.items[2].event_type == "normal"
     skipped = {s["name"]: s["reason"] for s in manifest.skipped}
     assert skipped["notes.txt"] == "not_recognised"
     assert skipped["2026_1399_250000_0009F.MP4"] == "bad_timestamp"

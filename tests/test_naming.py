@@ -54,7 +54,10 @@ def test_input_order_does_not_matter() -> None:
 
 def test_each_label_passes_through() -> None:
     clips = [_clip(_ts(2024, 3, 15, 14, 30))]
-    for label in ("front", "rear", "pip-front", "pip-rear"):
+    for label in (
+        "front", "rear", "tele", "interior",
+        "pip-front", "pip-rear", "pip-tele", "pip-interior",
+    ):
         assert build_basename(clips, label).endswith(f"_{label}_1clip")
 
 
@@ -74,6 +77,18 @@ def test_export_download_name_maps_type_and_adds_ext() -> None:
     )
     assert export_download_name("pip_rear", clips, 7) == (
         "2024-03-15_1430-1502_pip-rear_2clips.mp4"
+    )
+    assert export_download_name("join_tele", clips, 7) == (
+        "2024-03-15_1430-1502_tele_2clips.mp4"
+    )
+    assert export_download_name("join_interior", clips, 7) == (
+        "2024-03-15_1430-1502_interior_2clips.mp4"
+    )
+    assert export_download_name("pip_tele", clips, 7) == (
+        "2024-03-15_1430-1502_pip-tele_2clips.mp4"
+    )
+    assert export_download_name("pip_interior", clips, 7) == (
+        "2024-03-15_1430-1502_pip-interior_2clips.mp4"
     )
 
 

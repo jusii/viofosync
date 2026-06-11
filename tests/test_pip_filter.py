@@ -72,3 +72,21 @@ def test_front_main_is_the_default() -> None:
     assert _pip_filter_complex("top_right") == (
         _pip_filter_complex("top_right", main="front")
     )
+
+
+# Tele-main / interior-main: the partner clip is ffmpeg input 1
+# (the input swap happens in _pip's argv construction, not here),
+# so any non-front ``main`` yields the same graph as rear-main —
+# partner fullscreen, front (input 0) scaled to the inset.
+
+
+def test_tele_main_matches_rear_main_graph() -> None:
+    assert _pip_filter_complex("top_right", main="tele") == (
+        _pip_filter_complex("top_right", main="rear")
+    )
+
+
+def test_interior_main_matches_rear_main_graph() -> None:
+    assert _pip_filter_complex("bottom_left", main="interior") == (
+        _pip_filter_complex("bottom_left", main="rear")
+    )

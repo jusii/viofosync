@@ -18,6 +18,14 @@ def test_channel_of_rear_variants():
 
 def test_channel_of_interior():
     assert naming.channel_of("I") == "interior"
+    assert naming.channel_of("PI") == "interior"  # parking interior
+
+
+def test_channel_of_tele():
+    assert naming.channel_of("T") == "tele"
+    assert naming.channel_of("PT") == "tele"    # parking tele
+    assert naming.channel_of("ET") == "tele"    # event tele
+    assert naming.channel_of("t") == "tele"     # case-insensitive
 
 
 def test_channel_of_unknown_and_empty():
@@ -27,8 +35,11 @@ def test_channel_of_unknown_and_empty():
 
 
 def test_channel_order_and_labels():
-    assert naming.CHANNEL_ORDER == ["front", "rear", "interior", "other"]
+    assert naming.CHANNEL_ORDER == [
+        "front", "rear", "tele", "interior", "other",
+    ]
     assert naming.CHANNEL_LABELS["front"] == "Front"
     assert naming.CHANNEL_LABELS["rear"] == "Rear"
+    assert naming.CHANNEL_LABELS["tele"] == "Tele"
     assert naming.CHANNEL_LABELS["interior"] == "Interior"
     assert naming.CHANNEL_LABELS["other"] == "Other"
