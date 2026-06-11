@@ -85,7 +85,47 @@ def test_scan_lists_recognised_and_skipped(client):
     assert body["total_bytes"] == 10
     assert [it["basename"] for it in body["recognised"]] == [
         "2026_0101_080000_0001F.MP4"]
-    assert {s["name"] for s in body["skipped"]} == {"junk.bin"}
+    # Counts only — the endpoint must not leak skipped filenames.
+    assert body["skipped_count"] == 1
+    assert "skipped" not in body
+
+
+def test_present_reports_clips_already_in_archive(client):
+    c, rec = client
+    here = "2026_0101_080000_0001F.MP4"     # complete copy -> present
+    partial = "2026_0102_090000_0002R.MP4"  # archive smaller -> redo -> absent
+    gone = "2026_0103_100000_0003F.MP4"     # not imported -> absent
+    (rec / "2026-01-01").mkdir()
+    (rec / "2026-01-01" / here).write_bytes(b"a" * 10)
+    (rec / "2026-01-02").mkdir()
+    (rec / "2026-01-02" / partial).write_bytes(b"a" * 3)
+    r = c.post("/api/import/present", json={"files": [
+        {"name": here, "size": 10},
+        {"name": partial, "size": 10},
+        {"name": gone, "size": 10},
+    ]})
+    assert r.status_code == 200
+    assert r.json()["present"] == [here]
+
+
+def test_scan_marks_present_clips(client):
+    c, rec = client
+    card = rec / "import" / "DCIM"
+    card.mkdir(parents=True)
+    here = "2026_0101_080000_0001F.MP4"     # already archived, full size
+    partial = "2026_0102_090000_0002R.MP4"  # archived but truncated
+    fresh = "2026_0103_100000_0003F.MP4"    # not in archive
+    (card / here).write_bytes(b"a" * 10)
+    (card / partial).write_bytes(b"b" * 10)
+    (card / fresh).write_bytes(b"c" * 10)
+    (rec / "2026-01-01").mkdir()
+    (rec / "2026-01-01" / here).write_bytes(b"a" * 10)
+    (rec / "2026-01-02").mkdir()
+    (rec / "2026-01-02" / partial).write_bytes(b"b" * 4)
+    r = c.post("/api/import/scan", json={})
+    assert r.status_code == 200
+    present = {it["basename"]: it["present"] for it in r.json()["recognised"]}
+    assert present == {here: True, partial: False, fresh: False}
 
 
 def test_scan_bad_path_400(client):

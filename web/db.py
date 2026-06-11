@@ -136,7 +136,7 @@ CREATE INDEX IF NOT EXISTS idx_queue_state
 
 CREATE TABLE IF NOT EXISTS export_jobs (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    type          TEXT NOT NULL,      -- join_front|join_rear|pip
+    type          TEXT NOT NULL,      -- join_front|join_rear|pip|pip_rear|timeline
     clip_ids      TEXT NOT NULL,      -- JSON array
     state         TEXT NOT NULL,      -- queued|running|done|failed|cancelled
     progress      REAL NOT NULL DEFAULT 0.0,
@@ -233,6 +233,12 @@ class Database:
         # underlying clips are retention-pruned.
         _add_column("export_jobs", "clip_start", "INTEGER")
         _add_column("export_jobs", "clip_end", "INTEGER")
+
+        # Finished-output stats, snapshotted at finish so the export list can
+        # show length + size without re-probing the file on every poll (and
+        # even after the output is later removed).
+        _add_column("export_jobs", "output_size", "INTEGER")
+        _add_column("export_jobs", "output_duration_s", "REAL")
 
     @contextmanager
     def conn(self) -> Iterator[sqlite3.Connection]:

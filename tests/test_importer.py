@@ -84,6 +84,33 @@ def test_ingest_clip_places_file_and_records_origin(tmp_path: Path):
     assert rows[name]["event_type"] == "ro"
 
 
+def test_ingest_clip_marks_preexisting_queue_row_done(tmp_path: Path):
+    # The dashcam listed this clip first (queued pending); the user then
+    # bulk web-uploads it. The import must flip the row to done, or the
+    # next Wi-Fi cycle re-tries the (now 404) download.
+    from web.db import Database
+    from web.services import importer
+    rec = tmp_path / "rec"
+    rec.mkdir()
+    db = Database(str(rec / ".viofosync.db"))
+    name = "2026_0519_074752_022262PF.MP4"
+    with db.write() as c:
+        c.execute(
+            "INSERT INTO download_queue (filename, source_dir, state, "
+            "enqueued_at) VALUES (?,?,?,0)",
+            (name, "/DCIM/Movie", "pending"),
+        )
+    src = tmp_path / "usb"
+    src.mkdir()
+    (src / name).write_bytes(b"a" * 10)
+    man = importer.scan_source(str(src))
+    res = importer.ingest_clip(db, _snap(rec), man.items[0], cross_volume=True)
+    assert res.status == "imported"
+    rows = _origin_rows(db)
+    assert rows[name]["state"] == "done"
+    assert rows[name]["manual"] == 1
+
+
 def test_ingest_clip_cross_volume_copies_and_keeps_source(tmp_path: Path):
     from web.db import Database
     from web.services import importer
@@ -104,7 +131,7 @@ def test_ingest_clip_cross_volume_copies_and_keeps_source(tmp_path: Path):
     assert rows[name]["manual"] == 1
 
 
-def test_ingest_clip_skips_duplicate(tmp_path: Path):
+def test_ingest_clip_skips_complete_duplicate(tmp_path: Path):
     from web.db import Database
     from web.services import importer
     rec = tmp_path / "rec"
@@ -112,14 +139,53 @@ def test_ingest_clip_skips_duplicate(tmp_path: Path):
     db = Database(str(rec / ".viofosync.db"))
     name = "2026_0101_080000_0001F.MP4"
     (rec / "2026-01-01").mkdir()
-    (rec / "2026-01-01" / name).write_bytes(b"existing")
+    (rec / "2026-01-01" / name).write_bytes(b"x" * 10)   # same size -> complete
     src = tmp_path / "usb"
     src.mkdir()
     (src / name).write_bytes(b"a" * 10)
     man = importer.scan_source(str(src))
     res = importer.ingest_clip(db, _snap(rec), man.items[0], cross_volume=True)
     assert res.status == "already_present"
-    assert (rec / "2026-01-01" / name).read_bytes() == b"existing"
+    assert (rec / "2026-01-01" / name).read_bytes() == b"x" * 10
+
+
+def test_ingest_clip_redoes_partial_archive_file(tmp_path: Path):
+    from web.db import Database
+    from web.services import importer
+    rec = tmp_path / "rec"
+    rec.mkdir()
+    db = Database(str(rec / ".viofosync.db"))
+    name = "2026_0101_080000_0001F.MP4"
+    (rec / "2026-01-01").mkdir()
+    (rec / "2026-01-01" / name).write_bytes(b"ab")       # 2 bytes — truncated
+    src = tmp_path / "usb"
+    src.mkdir()
+    (src / name).write_bytes(b"a" * 10)
+    man = importer.scan_source(str(src))
+    res = importer.ingest_clip(db, _snap(rec), man.items[0], cross_volume=True)
+    assert res.status == "imported"                       # partial gets redone
+    assert (rec / "2026-01-01" / name).read_bytes() == b"a" * 10
+
+
+def test_present_in_archive_matches_size_and_skips_partials(tmp_path: Path):
+    from web.services import importer
+    rec = tmp_path / "rec"
+    rec.mkdir()
+    full = "2026_0101_080000_0001F.MP4"     # exact-size copy -> present
+    bigger = "2026_0102_090000_0002R.MP4"   # archive larger -> keep, present
+    partial = "2026_0103_100000_0003F.MP4"  # archive smaller -> redo, absent
+    gone = "2026_0104_110000_0004R.MP4"     # not imported at all -> absent
+    (rec / "2026-01-01").mkdir()
+    (rec / "2026-01-01" / full).write_bytes(b"a" * 10)
+    (rec / "2026-01-02").mkdir()
+    (rec / "2026-01-02" / bigger).write_bytes(b"a" * 20)
+    (rec / "2026-01-03").mkdir()
+    (rec / "2026-01-03" / partial).write_bytes(b"a" * 3)
+
+    present = importer.present_in_archive(_snap(rec), {
+        full: 10, bigger: 10, partial: 10, gone: 10, "notes.txt": 5,
+    })
+    assert present == {full, bigger}
 
 
 def test_ingest_clip_restores_source_when_final_rename_fails(tmp_path, monkeypatch):

@@ -70,6 +70,96 @@ async def test_finish_failed_job_does_not_violate_progress_constraint(
     assert row["finished_at"] is not None
 
 
+async def test_finish_snapshots_output_size_and_duration(
+    db: Database, tmp_path, monkeypatch,
+) -> None:
+    """A successful job records the output's byte size and length on the row so
+    the export list can show them without re-probing."""
+    from web.services import durations
+
+    out = tmp_path / "out.mp4"
+    out.write_bytes(b"\0" * 4096)
+    monkeypatch.setattr(durations, "_probe_duration_mvhd", lambda p: 73.5)
+
+    job_id = _insert_running_job(db, progress=0.9)
+    worker = ExportWorker(db=db, provider=MagicMock(), broadcast=_async_noop)
+    worker._finish(job_id, ok=True, err=None, output_path=str(out))
+
+    with db.conn() as c:
+        row = c.execute(
+            "SELECT * FROM export_jobs WHERE id=?", (job_id,)
+        ).fetchone()
+    assert row["output_size"] == 4096
+    assert row["output_duration_s"] == pytest.approx(73.5)
+
+
+async def test_finish_failure_leaves_output_stats_null(
+    db: Database,
+) -> None:
+    """A failed job has no usable output, so size/length stay NULL."""
+    job_id = _insert_running_job(db, progress=0.3)
+    worker = ExportWorker(db=db, provider=MagicMock(), broadcast=_async_noop)
+    worker._finish(job_id, ok=False, err="boom", output_path=None)
+
+    with db.conn() as c:
+        row = c.execute(
+            "SELECT * FROM export_jobs WHERE id=?", (job_id,)
+        ).fetchone()
+    assert row["output_size"] is None
+    assert row["output_duration_s"] is None
+
+
+async def test_make_export_preview_broadcasts_ready_on_success(
+    db: Database, monkeypatch,
+) -> None:
+    """When the filmstrip lands, the worker emits export_preview_ready so the
+    UI can swap its 'generating' placeholder for the real strip."""
+    from web.services import export_preview
+
+    events = []
+
+    async def capture(ev):
+        events.append(ev)
+
+    snap = MagicMock()
+    snap.recordings = "/rec"
+    provider = MagicMock()
+    provider.get.return_value = snap
+    worker = ExportWorker(db=db, provider=provider, broadcast=capture)
+
+    async def fake_ensure(recordings, job_id, output_path, duration_s):
+        return "/rec/.export_previews/9.jpg"
+
+    monkeypatch.setattr(export_preview, "ensure_export_preview", fake_ensure)
+    await worker._make_export_preview(9, "/tmp/out.mp4")
+    assert {"type": "export_preview_ready", "job_id": 9} in events
+
+
+async def test_make_export_preview_silent_when_generation_fails(
+    db: Database, monkeypatch,
+) -> None:
+    """No file -> no ready event (the placeholder simply stays)."""
+    from web.services import export_preview
+
+    events = []
+
+    async def capture(ev):
+        events.append(ev)
+
+    snap = MagicMock()
+    snap.recordings = "/rec"
+    provider = MagicMock()
+    provider.get.return_value = snap
+    worker = ExportWorker(db=db, provider=provider, broadcast=capture)
+
+    async def fake_ensure(*a, **k):
+        return None
+
+    monkeypatch.setattr(export_preview, "ensure_export_preview", fake_ensure)
+    await worker._make_export_preview(9, "/tmp/out.mp4")
+    assert events == []
+
+
 async def test_finish_done_job_writes_full_progress(
     db: Database,
 ) -> None:

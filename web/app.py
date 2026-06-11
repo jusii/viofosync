@@ -34,8 +34,10 @@ from .routers import setup as setup_router
 from .routers import storage as storage_router
 from .routers import imports as imports_router
 from .routers import logs as logs_router
+from .services import durations as _dur_mod
 from .services import retention as _ret_mod
 from .services import scanner
+from .services import tasks as _tasks
 from .services.exporter import (
     ExportWorker,
     ffmpeg_available,
@@ -52,6 +54,20 @@ from .setup_mode import SetupModeMiddleware
 log = logging.getLogger("viofosync.web")
 
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
+
+
+def _sync_worker_action(keys: set, snap) -> str | None:
+    """Decide how a settings change affects the sync worker.
+
+    Returns ``"start"``, ``"stop"``, or None (no relevant change).
+    Pure so the decision is unit-testable apart from the lifespan
+    wiring.
+    """
+    if not ({"ADDRESS", "ENABLE_SCHEDULED_SYNC"} & keys):
+        return None
+    if snap.enable_scheduled_sync and snap.address:
+        return "start"
+    return "stop"
 
 
 @asynccontextmanager
@@ -81,7 +97,10 @@ async def lifespan(app: FastAPI):
         if "SESSION_SECRET" in keys:
             app.state.auth.rotate_secret(snap.session_secret)
 
-    provider.subscribe(_on_settings_changed)
+    # Collect unsubscribe handles so shutdown can detach every
+    # callback — the provider is a module-level singleton, so leaking
+    # callbacks across lifespans pins dead app objects.
+    app.state.settings_unsubscribes = [provider.subscribe(_on_settings_changed)]
 
     db_path = default_db_path()
     migrate_legacy_db_path(db_path)
@@ -98,6 +117,12 @@ async def lifespan(app: FastAPI):
         log.info("reset %d orphan download row(s) to pending", n_dl)
     if n_jobs:
         log.info("marked %d orphan export job(s) as failed", n_jobs)
+    # Drop partial/unreferenced files a crashed render left in
+    # .exports (they'd otherwise count against the recordings quota).
+    try:
+        _exp_mod.sweep_orphan_exports(app.state.db, s.recordings)
+    except Exception:  # pragma: no cover — non-fatal
+        log.exception("export orphan sweep failed")
 
     log.info(
         "viofosync web UI ready on http://%s:%d", s.host, s.port
@@ -108,6 +133,18 @@ async def lifespan(app: FastAPI):
     )
 
     async def _background_scan() -> None:
+        # Salvage staged clips from a crash mid-import before the
+        # scan, so the recovered files get indexed in the same pass.
+        try:
+            from .services import importer as _imp_mod
+            rec = await asyncio.to_thread(
+                _imp_mod.recover_staging, app.state.db, s,
+            )
+            if rec["recovered"]:
+                log.info("recovered %d staged clip(s) from a previous "
+                         "interrupted import", rec["recovered"])
+        except Exception as e:  # pragma: no cover — non-fatal
+            log.warning("staging recovery failed: %s", e)
         try:
             log.info("initial archive scan: starting (%s)", s.recordings)
             loop = asyncio.get_running_loop()
@@ -128,6 +165,10 @@ async def lifespan(app: FastAPI):
             )
         except Exception as e:  # pragma: no cover — non-fatal
             log.warning("thumb sweep failed: %s", e)
+        try:
+            await _dur_mod.sweep_missing_durations(app.state.db)
+        except Exception as e:  # pragma: no cover — non-fatal
+            log.warning("duration sweep failed: %s", e)
 
     app.state.initial_scan_task = asyncio.create_task(_background_scan())
 
@@ -140,6 +181,7 @@ async def lifespan(app: FastAPI):
                 disk_pct=s.retention_disk_pct,
                 protect_ro=s.retention_protect_ro,
                 quota_gb=s.recordings_quota_gb,
+                protect_ids=_exp_mod.export_protect_ids(app.state.db),
             )
         except Exception:  # pragma: no cover — non-fatal
             log.exception("startup retention sweep failed")
@@ -153,6 +195,9 @@ async def lifespan(app: FastAPI):
         settings_provider=provider,
         session=app.state.download_session,
     )
+    # Threadpool route handlers emit events without a loop reference;
+    # the hub falls back to this bound loop.
+    app.state.hub.bind_loop(asyncio.get_running_loop())
     # Now that db + hub + loop exist, let the log handler persist and
     # live-broadcast records. Records logged earlier in startup were
     # buffered by the handler and flush when the drain task starts.
@@ -206,6 +251,23 @@ async def lifespan(app: FastAPI):
             "ADDRESS not set — sync worker idle until configured"
         )
 
+    def _on_sync_settings_changed(keys, snap) -> None:
+        # Apply ADDRESS / ENABLE_SCHEDULED_SYNC at runtime — these
+        # are not restart-required keys, so the settings UI reports
+        # them as applied; previously they did nothing until reboot.
+        worker = app.state.sync_worker
+        action = _sync_worker_action(keys, snap)
+        if action == "start" and not worker._is_running():
+            log.info("settings change: starting sync worker")
+            worker.start()
+        elif action == "stop" and worker._is_running():
+            log.info("settings change: stopping sync worker")
+            _tasks.spawn(worker.stop(), name="sync-worker-stop")
+
+    app.state.settings_unsubscribes.append(
+        provider.subscribe(_on_sync_settings_changed)
+    )
+
     app.state.mqtt = MqttService(
         db=app.state.db,
         provider=provider,
@@ -215,21 +277,25 @@ async def lifespan(app: FastAPI):
     if s.mqtt_enabled and s.mqtt_host:
         app.state.mqtt.start()
 
-    # Track current discovery/node so on_settings_changed can publish
-    # cleanup deletes against the *old* topology when those change.
-    app.state.mqtt._last_node_id = s.mqtt_node_id
-    app.state.mqtt._last_discovery_prefix = s.mqtt_discovery_prefix
-
     def _on_mqtt_settings_change(keys, snap):
         # Scheduled on the running loop so async work executes safely.
-        asyncio.create_task(app.state.mqtt.on_settings_changed(keys, snap))
+        _tasks.spawn(
+            app.state.mqtt.on_settings_changed(keys, snap),
+            name="mqtt-settings-changed",
+        )
 
-    provider.subscribe(_on_mqtt_settings_change)
+    app.state.settings_unsubscribes.append(
+        provider.subscribe(_on_mqtt_settings_change)
+    )
 
     try:
         yield
     finally:
         log.info("viofosync web UI shutting down")
+        # Detach settings subscribers first so the singleton provider
+        # doesn't keep firing into this (now tearing-down) app.
+        for _unsub in getattr(app.state, "settings_unsubscribes", []):
+            _unsub()
         mqtt_svc = getattr(app.state, "mqtt", None)
         if mqtt_svc is not None:
             await mqtt_svc.stop()
@@ -265,7 +331,7 @@ def create_app() -> FastAPI:
 
     app = FastAPI(
         title="Viofosync",
-        version="2.2",
+        version="2.3",
         lifespan=lifespan,
         docs_url=None,       # no swagger in prod build
         redoc_url=None,

@@ -171,8 +171,21 @@ class SettingsProvider:
 
     # ---------------------------------------------------------- subscribe
 
-    def subscribe(self, callback: Subscriber) -> None:
+    def subscribe(self, callback: Subscriber):
+        """Register ``callback`` for settings-change notifications.
+        Returns a zero-arg function that unsubscribes it — the app
+        lifespan calls these on shutdown so the module-level singleton
+        provider doesn't accumulate callbacks pinning dead app objects
+        across repeated lifespans (tests, uvicorn reload)."""
         self._subscribers.append(callback)
+
+        def _unsubscribe() -> None:
+            try:
+                self._subscribers.remove(callback)
+            except ValueError:
+                pass
+
+        return _unsubscribe
 
     def _broadcast(self, keys: set[str]) -> None:
         for cb in list(self._subscribers):

@@ -84,3 +84,36 @@ def test_cancel_raises_without_consuming_retries(tmp_path, monkeypatch):
     assert get_opens["n"] == 1
     # No half-written .part file left behind.
     assert list(tmp_path.glob("*.part")) == []
+
+
+# ---- cancellation during retry backoff ----
+
+def test_cancel_honoured_during_retry_backoff(tmp_path, monkeypatch):
+    """A pause/stop/unreachable signal must interrupt the inter-attempt
+    backoff sleep, not wait out the full 5-50s ladder."""
+    import datetime
+    import time
+    from unittest.mock import patch
+
+    from viofosync_lib import DownloadCancelled, _protocol
+    from viofosync_lib._archive import Recording
+
+    monkeypatch.setattr(_protocol, "max_download_attempts", 3)
+    monkeypatch.setattr(_protocol, "RETRY_BACKOFF", 30)  # would be a long wait
+
+    rec = Recording(
+        "2026_0101_120000_0001F.MP4", "/DCIM/Movie/x.MP4", 1000, 0,
+        datetime.datetime(2026, 1, 1, 12, 0), 0,
+    )
+
+    def fail(url_or_req, *a, **k):
+        raise ConnectionRefusedError("transient")
+
+    started = time.monotonic()
+    with patch("urllib.request.urlopen", side_effect=fail):
+        with __import__("pytest").raises(DownloadCancelled):
+            _protocol.download_file(
+                "http://192.0.2.1", rec, str(tmp_path), "",
+                cancel_check=lambda: True,
+            )
+    assert time.monotonic() - started < 2.0, "backoff sleep ignored cancel_check"

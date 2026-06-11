@@ -309,6 +309,16 @@ def parse_moov(in_fh):
                 sub_atom_size, sub_atom_type = get_atom_info(
                     in_fh.read(8)
                 )
+                # An atom can't be smaller than its own 8-byte
+                # header. A zero/short size here (truncated
+                # power-loss clip) used to loop forever re-reading
+                # the same offset.
+                if sub_atom_size < 8:
+                    logger.warning(
+                        "corrupt atom (size %d) at offset %d; "
+                        "stopping GPS walk", sub_atom_size, sub_offset
+                    )
+                    break
 
                 if sub_atom_type == 'gps ':
                     gps_offset = 16 + sub_offset

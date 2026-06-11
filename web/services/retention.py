@@ -20,6 +20,7 @@ import time as _time_mod
 from typing import Optional
 
 from ..db import Database
+from . import filmstrip as _filmstrip
 from . import thumbs as _thumbs
 
 log = logging.getLogger("viofosync.retention")
@@ -58,7 +59,13 @@ def _delete_clip_files(rec: dict, recordings: str) -> int:
         freed = os.path.getsize(path)
     except OSError:
         freed = 0
-    for p in (path, path + ".gpx", _thumbs.thumb_path(recordings, rec["id"])):
+    for p in (
+        path,
+        path + ".gpx",
+        _thumbs.thumb_path(recordings, rec["id"]),
+        _filmstrip.sprite_path(recordings, rec["id"]),
+        _filmstrip.meta_path(recordings, rec["id"]),
+    ):
         try:
             os.remove(p)
         except FileNotFoundError:
@@ -98,6 +105,7 @@ def sweep(
     quota_gb: int = 0,
     sink=None,
     exclude: frozenset[str] = frozenset(),
+    protect_ids: frozenset[int] = frozenset(),
     _now: Optional[int] = None,
 ) -> dict:
     """Run the retention pass. Returns a summary dict.
@@ -111,14 +119,17 @@ def sweep(
     protected = 0
     bytes_freed = 0
 
-    # Phase 1: time-based.
+    # Phase 1: time-based. ``protect_ids`` (clips referenced by
+    # pending/active export jobs) survive both phases — deleting a
+    # source mid-render fails the export.
     if max_days > 0:
+        guard_sql, guard_params = _protect_clause(protect_ids)
         with db.conn() as c:
             rows = [
                 dict(r) for r in c.execute(
                     "SELECT id, path, basename, timestamp, event_type "
-                    "FROM clip_index WHERE timestamp < ?",
-                    (now - max_days * 86400,),
+                    f"FROM clip_index WHERE timestamp < ?{guard_sql}",
+                    [now - max_days * 86400, *guard_params],
                 ).fetchall()
             ]
         if rows:
@@ -160,6 +171,7 @@ def sweep(
             protect_ro=protect_ro,
             sink=sink,
             exclude=exclude,
+            protect_ids=protect_ids,
         )
         bytes_freed += freed_2
         protected += protected_2
@@ -332,6 +344,15 @@ def _over_threshold(
     )
 
 
+def _protect_clause(protect_ids: frozenset[int]) -> tuple[str, list]:
+    """SQL fragment + params excluding export-protected clip ids from
+    a deletion-candidate query. Empty set → no-op fragment."""
+    if not protect_ids:
+        return "", []
+    ph = ",".join("?" * len(protect_ids))
+    return f" AND id NOT IN ({ph})", list(protect_ids)
+
+
 def _disk_pressure_pass(
     db: Database,
     recordings: str,
@@ -341,6 +362,7 @@ def _disk_pressure_pass(
     protect_ro: bool,
     sink,
     exclude: frozenset[str] = frozenset(),
+    protect_ids: frozenset[int] = frozenset(),
 ) -> tuple[int, int, int]:
     """Delete oldest clips first until both pressure rules are
     satisfied or no more eligible candidates remain.
@@ -372,16 +394,21 @@ def _disk_pressure_pass(
         recordings, disk_pct=disk_pct, quota_gb=quota_gb, refresh=True,
         exclude=exclude,
     ):
-        where = ""
+        conds = ["1=1"]
+        params: list = []
         if protect_ro:
-            where = "WHERE COALESCE(event_type, '') != 'ro'"
+            conds.append("COALESCE(event_type, '') != 'ro'")
+        guard_sql, guard_params = _protect_clause(protect_ids)
+        if guard_sql:
+            conds.append(guard_sql.removeprefix(" AND "))
+            params.extend(guard_params)
         with db.conn() as c:
             rows = [
                 dict(r) for r in c.execute(
                     f"SELECT id, path, basename, event_type "
-                    f"FROM clip_index {where} "
+                    f"FROM clip_index WHERE {' AND '.join(conds)} "
                     f"ORDER BY timestamp ASC LIMIT ?",
-                    (_BATCH_SIZE,),
+                    (*params, _BATCH_SIZE),
                 ).fetchall()
             ]
         if not rows:
@@ -417,6 +444,7 @@ def make_room_for(
     size: int, before_ts: int,
     disk_pct: int, quota_gb: int, protect_ro: bool,
     exclude: frozenset[str] = frozenset(),
+    protect_ids: frozenset[int] = frozenset(),
 ) -> bool:
     """Ensure ``size`` more bytes will fit under the active rules,
     by deleting the OLDEST clip whose timestamp < ``before_ts``
@@ -454,6 +482,9 @@ def make_room_for(
     params: list = [before_ts]
     if protect_ro:
         where += " AND COALESCE(event_type, '') != 'ro'"
+    guard_sql, guard_params = _protect_clause(protect_ids)
+    where += guard_sql
+    params.extend(guard_params)
 
     while _over():
         with db.conn() as c:

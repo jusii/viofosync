@@ -10,6 +10,7 @@ from ..auth import require_csrf, require_session
 from ..settings_schema import (
     DEFAULT_VALUES,
     EDITABLE_KEYS,
+    MASKED_SECRET,
     RESTART_REQUIRED_KEYS,
 )
 from .setup import _probe
@@ -60,7 +61,9 @@ def _editable_values(snap) -> dict[str, Any]:
         "MQTT_HOST": snap.mqtt_host,
         "MQTT_PORT": snap.mqtt_port,
         "MQTT_USERNAME": snap.mqtt_username,
-        "MQTT_PASSWORD": snap.mqtt_password,
+        # Write-only: never echo the stored secret. The sentinel
+        # round-trips as "unchanged" (see validate_partial).
+        "MQTT_PASSWORD": MASKED_SECRET if snap.mqtt_password else "",
         "MQTT_TLS": snap.mqtt_tls,
         "MQTT_CLIENT_ID": snap.mqtt_client_id,
         "MQTT_DISCOVERY_PREFIX": snap.mqtt_discovery_prefix,
@@ -164,5 +167,6 @@ async def restart(request: Request) -> dict:
         await asyncio.sleep(0.5)
         os.kill(os.getpid(), signal.SIGTERM)
 
-    asyncio.create_task(_bye())
+    from ..services import tasks as _tasks
+    _tasks.spawn(_bye(), name="graceful-restart")
     return {"ok": True}

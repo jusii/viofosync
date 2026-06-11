@@ -4,13 +4,16 @@ Listing endpoints (XML and HTML scrape), HEAD probes, and the
 chunked atomic byte downloader.
 
 The module-level ``socket_timeout`` and ``max_download_attempts``
-globals are intentionally exposed at module scope: the wrapper
-:func:`viofosync_lib.download_file_with` mutates them around a
-single download call to apply per-request overrides.
+globals are the defaults used when a caller doesn't pass per-call
+overrides; :func:`download_file` accepts ``socket_timeout`` /
+``max_attempts`` keyword args (threaded through by
+:func:`viofosync_lib.download_file_with`) so concurrent downloads
+never share mutable state.
 """
 from __future__ import annotations
 
 import datetime
+import errno
 import http.client
 import logging
 import os
@@ -39,7 +42,7 @@ class DownloadCancelled(Exception):
     """
 
 
-# Tunables (mutated by viofosync_lib.download_file_with).
+# Defaults used when download_file gets no per-call override.
 socket_timeout = 10.0
 DEFAULT_DOWNLOAD_ATTEMPTS = 1
 max_download_attempts = DEFAULT_DOWNLOAD_ATTEMPTS
@@ -49,6 +52,21 @@ RETRY_BACKOFF = 5  # seconds, multiplied by attempt number
 def parse_viofo_datetime(time_str):
     """Parse the datetime string from Viofo's format."""
     return datetime.datetime.strptime(time_str, "%Y/%m/%d %H:%M:%S")
+
+
+def _interruptible_sleep(seconds, cancel_check):
+    """Sleep up to ``seconds``, polling ``cancel_check`` so a
+    pause/stop/unreachable signal is honoured within ~100ms instead
+    of after the full backoff. Raises DownloadCancelled if asked to
+    stop."""
+    deadline = time.monotonic() + seconds
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        if cancel_check is not None and cancel_check():
+            raise DownloadCancelled("cancelled during retry backoff")
+        time.sleep(min(0.1, remaining))
 
 
 def get_dashcam_filenames(
@@ -66,7 +84,12 @@ def get_dashcam_filenames(
     try:
         url = f"{base_url}/?custom=1&cmd=3015&par=1"
         request = urllib.request.Request(url)
-        response = urllib.request.urlopen(request)
+        # Read the tunable at call time — download_file_with
+        # temporarily overrides it. Without a timeout a half-open
+        # connection wedges the sync worker's thread forever.
+        response = urllib.request.urlopen(
+            request, timeout=socket_timeout
+        )
 
         if response.getcode() != 200:
             raise RuntimeError(
@@ -257,19 +280,28 @@ def human_speed(num_bytes, elapsed):
 
 
 def download_file(base_url, recording, destination, group_name,
-                  progress_sink=None, cancel_check=None):
+                  progress_sink=None, cancel_check=None,
+                  *, max_attempts=None, socket_timeout=None):
     """Downloads a file from the Viofo dashcam to the destination.
 
     Returns (downloaded: bool, speed_str: str|None).
-    Uses HEAD to check size, retries up to max_download_attempts,
-    and verifies integrity after download.
+    Uses HEAD to check size, retries up to ``max_attempts``, and
+    verifies integrity after download.
 
     Optional args (used by the web UI):
       progress_sink: object with item_started/item_progress/
         item_finished methods; see viofosync_lib.ProgressSink.
       cancel_check: callable returning True if the download
         should be aborted (e.g. reachability lost, user stopped).
+      max_attempts / socket_timeout: per-call overrides. Passed as
+        parameters (not via module globals) so concurrent downloads
+        can't clobber each other; default to the module-level values
+        when omitted.
     """
+    # Resolve per-call overrides against the module defaults. ``timeout``
+    # shadows the module global of the same name within this function.
+    attempts = max_attempts if max_attempts is not None else max_download_attempts
+    timeout = socket_timeout if socket_timeout is not None else globals()["socket_timeout"]
     sink = progress_sink
     if group_name:
         group_filepath = os.path.join(destination, group_name)
@@ -295,11 +327,16 @@ def download_file(base_url, recording, destination, group_name,
     )
     url = f"{base_url}/{cleaned.lstrip('/')}"
 
-    # Check expected size via HEAD.
+    # Check expected size via HEAD. Some firmwares drop HEAD under
+    # load — fall back to the listing size so integrity verification
+    # still runs (a connection closed cleanly mid-stream otherwise
+    # archives a truncated file as a success).
     try:
-        expected_size = get_remote_size(url, socket_timeout)
+        expected_size = get_remote_size(url, timeout)
     except Exception:
         expected_size = None
+    if expected_size is None:
+        expected_size = recording.size
 
     # Skip if already downloaded and size matches.
     if os.path.exists(dest_filepath):
@@ -350,13 +387,13 @@ def download_file(base_url, recording, destination, group_name,
         sink.item_started(recording.filename, expected_size)
 
     try:
-        for attempt in range(1, max_download_attempts + 1):
+        for attempt in range(1, attempts + 1):
             try:
                 start = time.perf_counter()
                 bytes_done = 0
                 last_emit = start
                 with urllib.request.urlopen(
-                    url, timeout=socket_timeout
+                    url, timeout=timeout
                 ) as resp, open(tmp_path, "wb") as out:
                     while True:
                         if cancel_check is not None and cancel_check():
@@ -391,12 +428,17 @@ def download_file(base_url, recording, destination, group_name,
                 )
                 raise
             except Exception as e:
+                if isinstance(e, OSError) and e.errno == errno.ENOSPC:
+                    # Full disk: retrying can only fail the same way
+                    # and would burn the item's retry budget. Raise so
+                    # the caller can surface a sticky disk error.
+                    raise
                 logger.warning(
                     f"Download attempt {attempt} failed for "
                     f"{recording.filename}: {e}"
                 )
-                if attempt < max_download_attempts:
-                    time.sleep(RETRY_BACKOFF * attempt)
+                if attempt < attempts:
+                    _interruptible_sleep(RETRY_BACKOFF * attempt, cancel_check)
                 continue
 
             actual_size = os.path.getsize(tmp_path)
@@ -410,8 +452,8 @@ def download_file(base_url, recording, destination, group_name,
                     f"{human_size(actual_size)}/"
                     f"{human_size(expected_size)}"
                 )
-                if attempt < max_download_attempts:
-                    time.sleep(RETRY_BACKOFF * attempt)
+                if attempt < attempts:
+                    _interruptible_sleep(RETRY_BACKOFF * attempt, cancel_check)
                 continue
 
             # Success — atomic move into place.
@@ -431,7 +473,7 @@ def download_file(base_url, recording, destination, group_name,
         # All attempts exhausted.
         logger.error(
             f"Failed to download {recording.filename} "
-            f"after {max_download_attempts} attempts"
+            f"after {attempts} attempts"
         )
         if sink is not None:
             sink.item_finished(

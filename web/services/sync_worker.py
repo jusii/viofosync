@@ -22,6 +22,7 @@ logic with the CLI.
 from __future__ import annotations
 
 import asyncio
+import errno as _errno
 import logging
 import os
 import socket
@@ -49,6 +50,40 @@ BACKOFF_STEPS = [10, 30, 120, 600]  # seconds
 # still sweeps immediately after a drain; this loop is what keeps the
 # archive bounded when the camera is offline or has nothing new.
 RETENTION_INTERVAL_SECONDS = 300  # 5 minutes
+
+# Upper bound on how long stop() waits for the cycle/retention tasks
+# before abandoning them — keeps SIGTERM shutdown bounded even when a
+# cycle is wedged in an uncancellable executor call.
+STOP_TIMEOUT = 10.0
+
+
+class DiskFullError(Exception):
+    """Raised by _download_one on ENOSPC: the recordings volume is
+    full, so the drain loop must stop instead of marching the rest of
+    the queue through their retry budgets."""
+
+
+def _path_is_writable(path: str) -> bool:
+    """Return True if *path* is a directory we can actually write to.
+
+    We probe with a real create-and-delete rather than ``os.access(W_OK)``:
+    on NFS (and other networked filesystems) ``os.access`` checks the cached
+    owner/mode against the local UID and can report a perfectly writable
+    export as non-writable, while the real write is accepted by the server's
+    own permission mapping. A live probe is the only reliable test."""
+    if not (path and os.path.isdir(path)):
+        return False
+    probe = os.path.join(path, f".viofosync-writetest-{os.getpid()}")
+    try:
+        with open(probe, "w"):
+            pass
+    except OSError:
+        return False
+    try:
+        os.unlink(probe)
+    except OSError:
+        pass
+    return True
 
 
 def _filter_ro_only(listing):
@@ -339,7 +374,6 @@ class SyncWorker:
         return not self._task.done()
 
     async def stop(self) -> None:
-        log.info("sync worker stopped")
         self._stop.set()
         self._cancel_current.set()
         self._kick.set()
@@ -348,17 +382,28 @@ class SyncWorker:
             if task is None:
                 continue
             # ``task`` may be an asyncio.Task or a
-            # concurrent.futures.Future — wrap uniformly.
+            # concurrent.futures.Future — wrap uniformly, and bound
+            # the wait either way: a cycle wedged in an uncancellable
+            # executor call (hung NFS stat, slow urllib read) must
+            # not hang SIGTERM shutdown forever.
+            if isinstance(task, concurrent.futures.Future):
+                waitable = asyncio.wrap_future(task)
+            else:
+                waitable = task
             try:
-                if isinstance(task, concurrent.futures.Future):
-                    await asyncio.wrap_future(task)
-                else:
-                    await asyncio.wait_for(task, timeout=10.0)
-            except (asyncio.TimeoutError, Exception):
+                await asyncio.wait_for(waitable, timeout=STOP_TIMEOUT)
+            except asyncio.TimeoutError:
+                log.warning(
+                    "sync worker did not stop within %.0fs; abandoning",
+                    STOP_TIMEOUT,
+                )
                 try:
                     task.cancel()
                 except Exception:
                     pass
+            except Exception:
+                log.exception("sync worker task raised during stop")
+        log.info("sync worker stopped")
 
     def kick(self) -> None:
         """Trigger an immediate cycle (e.g. user clicked Start
@@ -471,7 +516,7 @@ class SyncWorker:
         Emits a sticky sync_error on failure, clears one on recovery."""
         snap = self._provider.get()
         path = getattr(snap, "recordings", None) or ""
-        ok = bool(path) and os.path.isdir(path) and os.access(path, os.W_OK)
+        ok = _path_is_writable(path)
         if not ok:
             await self._set_sync_error(
                 "recordings_unwritable",
@@ -554,6 +599,7 @@ class SyncWorker:
         the sweep walks the archive and touches the DB."""
         snap = self._provider.get()
         sink = WebSink(self.hub, asyncio.get_running_loop())
+        from .exporter import export_protect_ids
         await asyncio.to_thread(
             _retention.sweep,
             self.db, snap.recordings,
@@ -565,6 +611,7 @@ class SyncWorker:
             exclude=_retention.import_exclude_set(
                 snap.recordings, snap.import_path
             ),
+            protect_ids=export_protect_ids(self.db),
         )
         await self._emit_disk_pct()
 
@@ -619,8 +666,14 @@ class SyncWorker:
             return False
         if self._provider.get().sync_ro_only:
             listing = list(_filter_ro_only(listing))
-        present = self._present_filenames()
-        summary = q.reconcile(self.db, listing, present)
+        # Both the archive walk and the reconcile transaction are
+        # blocking I/O (NAS stat calls, sqlite write lock) — keep
+        # them off the event loop or every request/WebSocket stalls
+        # behind a slow recordings volume.
+        present = await asyncio.to_thread(self._present_filenames)
+        summary = await asyncio.to_thread(
+            q.reconcile, self.db, listing, present
+        )
         await self.hub.broadcast({
             "type": "queue_reconciled",
             "summary": summary,
@@ -696,7 +749,15 @@ class SyncWorker:
                 return True
             self._current_filename = item.filename
             self._broadcast_sync_state()
-            ok = await self._download_one(item)
+            try:
+                ok = await self._download_one(item)
+            except DiskFullError:
+                log.warning(
+                    "recordings volume full — stopping this cycle's "
+                    "downloads; will retry next cycle"
+                )
+                self._current_filename = None
+                return did_any
             self._current_filename = None
             did_any = True
             if not ok:
@@ -831,15 +892,32 @@ class SyncWorker:
                         base_url=base,
                         sink=sink,
                     )
-                return ok, None, False
+                return ok, None, False, False
             except vfs.DownloadCancelled:
                 # Deliberate abort (pause/stop/unreachable): not a
                 # failure, so the caller must not burn an attempt.
-                return False, None, True
+                return False, None, True, False
+            except OSError as e:
+                if e.errno == _errno.ENOSPC:
+                    return False, str(e), False, True
+                return False, str(e), False, False
             except Exception as e:
-                return False, str(e), False
+                return False, str(e), False, False
 
-        ok, err, cancelled = await loop.run_in_executor(None, _blocking)
+        ok, err, cancelled, disk_full = await loop.run_in_executor(
+            None, _blocking
+        )
+
+        if disk_full:
+            # Refund the attempt (retrying a full disk can only fail),
+            # surface a sticky error, and abort this cycle's drain.
+            # The next cycle retries one item; success clears the error.
+            q.mark_cancelled(self.db, item.id)
+            q.emit_queue_changed(self.db, self.hub)
+            await self._set_sync_error(
+                "disk_full", "recordings volume is full",
+            )
+            raise DiskFullError(err)
 
         if cancelled:
             # Return the item to pending with its attempt refunded so it
@@ -850,6 +928,8 @@ class SyncWorker:
             return False
 
         if ok:
+            if self._last_error_kind == "disk_full":
+                await self._clear_sync_error()
             q.mark_done(self.db, item.id)
             q.emit_queue_changed(self.db, self.hub)
             return True

@@ -64,6 +64,14 @@ class TestDashcamRequest(BaseModel):
 @router.post("/api/setup/test-dashcam")
 async def test_dashcam(request: Request, body: TestDashcamRequest):
     _require_unconfigured(request)
+    # Deliberately NOT restricted to LAN targets: the dashcam is
+    # legitimately reachable via a public-resolving name (Tailscale's
+    # 100.64/10, dynamic DNS to a port-forwarded camera, etc.), and
+    # the dominant risk during the unauthenticated setup window is the
+    # setup form itself (account takeover), not this connect probe —
+    # so a LAN-only filter here would block real setups for no
+    # meaningful security gain. The README warns not to expose the
+    # container to the internet during the setup window.
     return await _probe(body.address)
 
 

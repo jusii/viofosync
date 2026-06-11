@@ -42,20 +42,17 @@ def download_file_with(
     socket_timeout: float | None = None,
     **kwargs,
 ):
-    """Call :func:`download_file` with a temporarily-overridden
-    ``max_attempts`` / ``socket_timeout``, restoring the prior
-    values on exit. Avoids direct mutation of module globals from
-    callers."""
+    """Call :func:`download_file` with per-call ``max_attempts`` /
+    ``socket_timeout`` overrides. Passes them straight through as
+    parameters (download_file resolves None to the module defaults),
+    so two concurrent downloads never clobber each other's settings."""
     from . import _protocol as _proto
-    saved = (_proto.max_download_attempts, _proto.socket_timeout)
-    if max_attempts is not None:
-        _proto.max_download_attempts = max_attempts
-    if socket_timeout is not None:
-        _proto.socket_timeout = socket_timeout
-    try:
-        return _proto.download_file(*args, **kwargs)
-    finally:
-        _proto.max_download_attempts, _proto.socket_timeout = saved
+    return _proto.download_file(
+        *args,
+        max_attempts=max_attempts,
+        socket_timeout=socket_timeout,
+        **kwargs,
+    )
 
 
 def delete_dashcam_file(

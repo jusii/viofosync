@@ -1,0 +1,312 @@
+"""Tests for the filmstrip sprite service (ffmpeg mocked)."""
+from __future__ import annotations
+
+import json
+import logging
+import os
+from pathlib import Path
+
+from web.services import filmstrip, retention
+
+
+def test_frame_count_basics():
+    # 60s clip, one frame / 8s -> ceil(60/8) = 8
+    assert filmstrip.frame_count(60.0) == 8
+    # exact multiple
+    assert filmstrip.frame_count(16.0) == 2
+    # short / zero / None always yields at least one tile
+    assert filmstrip.frame_count(3.0) == 1
+    assert filmstrip.frame_count(0.0) == 1
+    assert filmstrip.frame_count(None) == 1
+
+
+def test_paths_are_under_filmstrips_dir(tmp_path: Path):
+    rec = str(tmp_path)
+    sp = filmstrip.sprite_path(rec, 42)
+    mp = filmstrip.meta_path(rec, 42)
+    assert sp.endswith(os.path.join(".filmstrips", "42.jpg"))
+    assert mp.endswith(os.path.join(".filmstrips", "42.json"))
+    # accessing a path helper creates the cache dir
+    assert os.path.isdir(os.path.join(rec, ".filmstrips"))
+
+
+async def test_ensure_returns_none_when_ffmpeg_missing(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(filmstrip.shutil, "which", lambda _name: None)
+    meta = await filmstrip.ensure_filmstrip(
+        str(tmp_path), 7, str(tmp_path / "clip.mp4"), 60.0
+    )
+    assert meta is None
+
+
+async def test_ensure_cache_hit_reads_sidecar_without_ffmpeg(tmp_path: Path, monkeypatch):
+    rec = str(tmp_path)
+    # Pre-seed a cached sprite + sidecar.
+    Path(filmstrip.sprite_path(rec, 9)).write_bytes(b"\xff\xd8\xff\xd9")  # tiny JPEG-ish
+    Path(filmstrip.meta_path(rec, 9)).write_text(json.dumps({
+        "frames": 8, "interval_s": 8, "tile_w": 160, "tile_h": 90, "duration_s": 60.0,
+    }))
+
+    # If ffmpeg were invoked this would explode — proves the cache short-circuits.
+    def _boom(*a, **k):
+        raise AssertionError("ffmpeg must not run on a cache hit")
+    monkeypatch.setattr(filmstrip.asyncio, "create_subprocess_exec", _boom)
+
+    meta = await filmstrip.ensure_filmstrip(rec, 9, str(tmp_path / "clip.mp4"), 60.0)
+    assert meta == filmstrip.FilmstripMeta(8, 8, 160, 90, 60.0)
+
+
+async def test_ensure_generates_sprite_and_sidecar(tmp_path: Path, monkeypatch):
+    rec = str(tmp_path)
+    monkeypatch.setattr(filmstrip.shutil, "which", lambda _name: "/usr/bin/ffmpeg")
+    calls = _capture_all_exec(monkeypatch)
+
+    meta = await filmstrip.ensure_filmstrip(rec, 5, "/rec/clip.mp4", 60.0)
+
+    # Returned + persisted metadata (unchanged contract)
+    assert meta == filmstrip.FilmstripMeta(8, 8, 160, 90, 60.0)
+    assert os.path.exists(filmstrip.sprite_path(rec, 5))
+    with open(filmstrip.meta_path(rec, 5)) as f:
+        assert json.load(f)["frames"] == 8
+
+    # One seek-extract per tile (read only near each 8s mark, not the whole
+    # file), then a single stitch pass into the sprite.
+    extracts = [c for c in calls if "-ss" in c]
+    tiles = [c for c in calls if any("tile=" in a for a in c)]
+    assert len(extracts) == 8
+    assert [c[c.index("-ss") + 1] for c in extracts] == \
+        ["0", "8", "16", "24", "32", "40", "48", "56"]
+    for c in extracts:
+        assert c[c.index("-i") + 1] == "/rec/clip.mp4"
+        assert "-frames:v" in c
+        assert c[c.index("-vf") + 1] == "scale=160:90"
+        assert "-an" in c
+        assert "-hwaccel" not in c          # software only — hwaccel is slower here
+    assert len(tiles) == 1
+    assert tiles[0][tiles[0].index("-vf") + 1] == "tile=8x1"
+    # Montage targets a staged temp name; the verified result is
+    # renamed onto the cache path (partial output must never land
+    # at the final path — see test_thumb_atomic.py).
+    assert tiles[0][-1] == filmstrip.sprite_path(rec, 5) + ".part.jpg"
+
+
+def _capture_all_exec(monkeypatch):
+    """Patch create_subprocess_exec to record every call's argv and write a
+    stub output (each ffmpeg writes its last positional arg)."""
+    calls: list[list[str]] = []
+
+    class _Proc:
+        returncode = 0
+        async def wait(self):
+            return 0
+
+    async def fake_exec(*args, **kwargs):
+        calls.append(list(args))
+        Path(args[-1]).write_bytes(b"\xff\xd8\xff\xd9")
+        return _Proc()
+
+    monkeypatch.setattr(filmstrip.asyncio, "create_subprocess_exec", fake_exec)
+    return calls
+
+
+async def test_ensure_short_clip_is_single_seek(tmp_path: Path, monkeypatch):
+    """A sub-INTERVAL clip yields one tile: a single seek at t=0."""
+    rec = str(tmp_path)
+    monkeypatch.setattr(filmstrip.shutil, "which", lambda _name: "/usr/bin/ffmpeg")
+    calls = _capture_all_exec(monkeypatch)
+
+    meta = await filmstrip.ensure_filmstrip(rec, 7, "/rec/c.mp4", 3.0)
+    assert meta.frames == 1
+    extracts = [c for c in calls if "-ss" in c]
+    assert len(extracts) == 1
+    assert extracts[0][extracts[0].index("-ss") + 1] == "0"
+
+
+async def test_ensure_returns_none_on_ffmpeg_nonzero(tmp_path: Path, monkeypatch):
+    rec = str(tmp_path)
+    monkeypatch.setattr(filmstrip.shutil, "which", lambda _name: "/usr/bin/ffmpeg")
+
+    class _FailProc:
+        returncode = 1
+        async def wait(self):
+            return 1
+
+    async def fake_exec(*args, **kwargs):
+        return _FailProc()  # writes nothing
+
+    monkeypatch.setattr(filmstrip.asyncio, "create_subprocess_exec", fake_exec)
+    meta = await filmstrip.ensure_filmstrip(rec, 6, "/rec/clip.mp4", 60.0)
+    assert meta is None
+
+
+def test_retention_removes_filmstrip_sprite_and_sidecar(tmp_path: Path):
+    rec = str(tmp_path)
+    clip_file = tmp_path / "clip.mp4"
+    clip_file.write_bytes(b"\0")
+
+    sp = filmstrip.sprite_path(rec, 11)
+    mp = filmstrip.meta_path(rec, 11)
+    Path(sp).write_bytes(b"\xff\xd8\xff\xd9")
+    Path(mp).write_text("{}")
+
+    rec_row = {"id": 11, "path": str(clip_file)}
+    retention._delete_clip_files(rec_row, rec)
+
+    assert not clip_file.exists()
+    assert not os.path.exists(sp)
+    assert not os.path.exists(mp)
+
+
+class _HangProc:
+    """Fake ffmpeg child: kill() records, wait() counts body runs."""
+    returncode = None
+
+    def __init__(self):
+        self.killed = False
+        self.reaped = 0
+
+    def kill(self):
+        self.killed = True
+
+    async def wait(self):
+        self.reaped += 1
+        return 0
+
+
+async def _raise_timeout(coro, timeout):
+    # Close the inner proc.wait() coroutine so it isn't left un-awaited
+    # (the suite runs under filterwarnings=error), then simulate a timeout.
+    coro.close()
+    raise TimeoutError
+
+
+async def test_ensure_reaps_child_on_timeout(tmp_path: Path, monkeypatch):
+    rec = str(tmp_path)
+    monkeypatch.setattr(filmstrip.shutil, "which", lambda _n: "/usr/bin/ffmpeg")
+    fake = _HangProc()
+
+    async def fake_exec(*a, **k):
+        return fake
+
+    monkeypatch.setattr(filmstrip.asyncio, "create_subprocess_exec", fake_exec)
+    monkeypatch.setattr(filmstrip.asyncio, "wait_for", _raise_timeout)
+
+    result = await filmstrip.ensure_filmstrip(rec, 99, "/x.mp4", 60.0)
+    assert result is None
+    assert fake.killed is True
+    assert fake.reaped == 1   # proc.wait() awaited after kill -> child reaped
+
+
+# --- logging: the timeline feature must be debuggable via the Logs tab.
+# The app log persists INFO+ from the ``viofosync.*` namespace, so these
+# assert the filmstrip service emits on that logger so a NAS CPU spike is
+# traceable to the exact clips being rendered.
+
+
+async def test_generation_logs_start_and_done(tmp_path: Path, monkeypatch, caplog):
+    rec = str(tmp_path)
+    monkeypatch.setattr(filmstrip.shutil, "which", lambda _name: "/usr/bin/ffmpeg")
+
+    class _FakeProc:
+        returncode = 0
+        async def wait(self):
+            return 0
+
+    async def fake_exec(*args, **kwargs):
+        Path(args[-1]).write_bytes(b"\xff\xd8\xff\xd9")
+        return _FakeProc()
+
+    monkeypatch.setattr(filmstrip.asyncio, "create_subprocess_exec", fake_exec)
+
+    with caplog.at_level(logging.INFO, logger="viofosync.filmstrip"):
+        await filmstrip.ensure_filmstrip(rec, 5, "/rec/clip.mp4", 60.0)
+
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any("generating clip=5" in m and "frames=8" in m for m in msgs)
+    assert any("clip=5 done" in m for m in msgs)
+
+
+async def test_timeout_logs_warning(tmp_path: Path, monkeypatch, caplog):
+    rec = str(tmp_path)
+    monkeypatch.setattr(filmstrip.shutil, "which", lambda _n: "/usr/bin/ffmpeg")
+    fake = _HangProc()
+
+    async def fake_exec(*a, **k):
+        return fake
+
+    monkeypatch.setattr(filmstrip.asyncio, "create_subprocess_exec", fake_exec)
+    monkeypatch.setattr(filmstrip.asyncio, "wait_for", _raise_timeout)
+
+    with caplog.at_level(logging.INFO, logger="viofosync.filmstrip"):
+        await filmstrip.ensure_filmstrip(rec, 99, "/x.mp4", 60.0)
+
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any("clip=99 generation failed" in m for m in warnings)
+
+
+async def test_ffmpeg_nonzero_logs_warning(tmp_path: Path, monkeypatch, caplog):
+    rec = str(tmp_path)
+    monkeypatch.setattr(filmstrip.shutil, "which", lambda _name: "/usr/bin/ffmpeg")
+
+    class _FailProc:
+        returncode = 1
+        async def wait(self):
+            return 1
+
+    async def fake_exec(*args, **kwargs):
+        return _FailProc()
+
+    monkeypatch.setattr(filmstrip.asyncio, "create_subprocess_exec", fake_exec)
+    with caplog.at_level(logging.INFO, logger="viofosync.filmstrip"):
+        await filmstrip.ensure_filmstrip(rec, 6, "/rec/clip.mp4", 60.0)
+
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any("clip=6 generation failed" in m for m in warnings)
+
+
+async def test_missing_ffmpeg_warns_once(tmp_path: Path, monkeypatch, caplog):
+    monkeypatch.setattr(filmstrip.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(filmstrip, "_warned_no_ffmpeg", False)
+
+    with caplog.at_level(logging.INFO, logger="viofosync.filmstrip"):
+        await filmstrip.ensure_filmstrip(str(tmp_path), 1, "/a.mp4", 60.0)
+        await filmstrip.ensure_filmstrip(str(tmp_path), 2, "/b.mp4", 60.0)
+
+    no_ffmpeg = [
+        r for r in caplog.records
+        if "ffmpeg not found" in r.getMessage()
+    ]
+    assert len(no_ffmpeg) == 1   # warned once, not once-per-clip
+
+
+async def test_generate_sprite_at_extracts_given_timestamps(tmp_path, monkeypatch):
+    from pathlib import Path
+    seen = []
+
+    async def fake_run(cmd, timeout):
+        if "-ss" in cmd:
+            seen.append(cmd[cmd.index("-ss") + 1])
+        Path(cmd[-1]).write_bytes(b"\xff\xd8\xff\xd9")  # tiny JPEG-ish
+        return 0
+
+    monkeypatch.setattr(filmstrip, "_run_ffmpeg", fake_run)
+    ok = await filmstrip.generate_sprite_at(
+        "ffmpeg", "in.mp4", str(tmp_path / "s.jpg"), [1.5, 3.0, 4.5])
+    assert ok is True
+    assert seen == ["1.5", "3.0", "4.5"]
+
+
+async def test_generate_sprite_keeps_interval_timestamps(tmp_path, monkeypatch):
+    # Regression: the clip filmstrip must still seek at i*INTERVAL_S.
+    from pathlib import Path
+    seen = []
+
+    async def fake_run(cmd, timeout):
+        if "-ss" in cmd:
+            seen.append(cmd[cmd.index("-ss") + 1])
+        Path(cmd[-1]).write_bytes(b"\xff\xd8\xff\xd9")
+        return 0
+
+    monkeypatch.setattr(filmstrip, "_run_ffmpeg", fake_run)
+    ok = await filmstrip._generate_sprite("ffmpeg", "in.mp4", str(tmp_path / "s.jpg"), 4)
+    assert ok is True
+    assert seen == ["0", "8", "16", "24"]  # INTERVAL_S == 8

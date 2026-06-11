@@ -172,6 +172,12 @@ EDITABLE_KEYS = {
 RESTART_REQUIRED_KEYS = {"WEB_HOST", "WEB_PORT"}
 READONLY_KEYS = {"PUID", "PGID", "TZ", "RECORDINGS"}
 
+# Secret editable keys the API never echoes back: GET returns this
+# sentinel when a value is set, and a PUT carrying the sentinel is
+# treated as "leave unchanged" (see validate_partial).
+MASKED_SECRET = "••••••••"  # 8 bullets
+MASKED_KEYS = {"MQTT_PASSWORD"}
+
 DEFAULT_VALUES = {
     name: getattr(SettingsModel(), name)
     for name in SettingsModel.model_fields
@@ -186,6 +192,14 @@ def validate_partial(patch: dict) -> dict:
     that merges DEFAULT_VALUES with the patch and extracting the
     coerced patch values.
     """
+    # Drop masked-secret keys whose value is the sentinel the GET
+    # handed out — that means "unchanged", so they must not overwrite
+    # the stored secret with the placeholder.
+    patch = {
+        k: v for k, v in patch.items()
+        if not (k in MASKED_KEYS and v == MASKED_SECRET)
+    }
+
     for k in patch:
         if k in READONLY_KEYS:
             raise ValueError(f"{k} is read-only")

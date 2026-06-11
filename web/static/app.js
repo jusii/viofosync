@@ -20,7 +20,8 @@ const state = {
   filters: { driving: true, parking: true, ro: true },
   showMaps: localStorage.getItem("vfs.showMaps") !== "0",
   archiveSelected: new Map(),  // pair_id → { ts, front, rear }
-  archiveRefreshTimer: null,
+  archiveExpanded: new Set(),  // open archive day keys ("YYYY-MM-DD"); persists
+                               // open days across in-app navigation (re-render)
   map: null,
   routeLayer: null,
   ws: null,
@@ -45,6 +46,17 @@ function cssVar(name) {
   return getComputedStyle(document.documentElement)
     .getPropertyValue(name)
     .trim();
+}
+
+// Escape a string for interpolation into innerHTML templates —
+// element body OR attribute context (quotes included). Clip
+// filenames are external data: the Viofo regex allows any
+// characters in the camera segment, and geocode labels come from
+// Nominatim. Anything not produced by this file must pass through
+// here before reaching an HTML template.
+function escHtml(s) {
+  return String(s == null ? "" : s).replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
 // ---------- API helpers ----------
@@ -243,43 +255,48 @@ function routeTo(hash) {
   if (logsView) logsView.hidden = tab !== "logs";
   const settingsView = document.getElementById("view-settings");
   if (settingsView) settingsView.hidden = tab !== "settings";
+  const timelineView = document.getElementById("view-timeline");
+  if (timelineView) {
+    timelineView.hidden = tab !== "timeline";
+    // Stop timeline playback when navigating away (a hidden <video>
+    // keeps playing audio otherwise).
+    if (tab !== "timeline" && window.Timeline && window.Timeline.close) {
+      window.Timeline.close();
+    }
+  }
   if (tab === "archive") {
     loadDays();
     refreshExportJobs();
-    startArchiveAutoRefresh();
-  } else {
-    stopArchiveAutoRefresh();
   }
   if (tab === "downloads") loadQueue();
   if (tab === "logs") loadLogs();
   if (tab === "settings") loadSettings();
-}
-
-// Periodic rescan + reload so freshly downloaded clips appear
-// without a manual refresh. Rescan is cheap (UPSERT per file).
-async function autoRefreshArchive() {
-  if (document.getElementById("view-archive").hidden) return;
-  // Skip while the user has a day expanded — re-rendering would
-  // collapse the card, reset the map, and drop any unsubmitted
-  // selections.
-  const expanded = document.querySelector(
-    "#days .day .day-body:not([hidden])",
-  );
-  if (expanded) return;
-  try { await api("/api/archive/rescan", { method: "POST" }); }
-  catch { /* non-fatal */ }
-  await loadDays();
-}
-
-function startArchiveAutoRefresh() {
-  stopArchiveAutoRefresh();
-  state.archiveRefreshTimer = setInterval(autoRefreshArchive, 30000);
-}
-function stopArchiveAutoRefresh() {
-  if (state.archiveRefreshTimer) {
-    clearInterval(state.archiveRefreshTimer);
-    state.archiveRefreshTimer = null;
+  if (tab === "timeline") {
+    // "#/timeline/<date>/<journeyIdx?>" — segments after the tab.
+    const segs = stripped.split("/");
+    const date = segs[1] || "";
+    const n = segs[2] != null && segs[2] !== "" ? Number(segs[2]) : null;
+    const journey = Number.isInteger(n) && n >= 0 ? n : null;
+    if (window.Timeline && date) window.Timeline.open(date, journey);
   }
+}
+
+// Refresh the day list when the server re-indexes the archive. The
+// backend already broadcasts a `clip_indexed` WS event on every scan
+// (sync-worker download, startup scan, manual rescan, import), so we
+// reload on that push instead of polling. Guarded so we don't disrupt
+// the user: skip while the archive view is hidden, and skip while a day
+// is expanded — re-rendering would collapse the open card, reset its
+// map, and drop any unsubmitted selections.
+//
+// This replaces an earlier 30s client-side poll that issued a full
+// `/api/archive/rescan` (walking the whole recordings tree) from every
+// open tab — so N open archive clients meant N full rescans per tick.
+// The work is the server's to do once; the browser just reacts to it.
+function refreshArchiveOnIndexChange() {
+  if (document.getElementById("view-archive").hidden) return;
+  if (document.querySelector("#days .day .day-body:not([hidden])")) return;
+  loadDays();
 }
 
 // ---------- Archive ----------
@@ -295,7 +312,7 @@ wireArchiveFilter("f-driving", "driving");
 wireArchiveFilter("f-parking", "parking");
 wireArchiveFilter("f-ro", "ro");
 
-// "GPS maps" is a view option, not a filter: it gates the
+// "GPS Journey Splits" is a view option, not a filter: it gates the
 // journey machinery (Leaflet, route fetch, reverse-geocode) on
 // expansion but doesn't change what's fetched. Persisted to
 // localStorage.
@@ -373,7 +390,25 @@ function archiveKindParams(q) {
   q.set("ro", state.filters.ro ? "true" : "false");
 }
 
+// Tear down Leaflet instances under `root` before its innerHTML is
+// wiped — Leaflet registers document-level listeners per map, so
+// dropping the DOM nodes without map.remove() leaks every instance
+// (the timeline view already does this; the archive didn't).
+function destroyJourneyMaps(root) {
+  for (const div of root.querySelectorAll(".journey-map")) {
+    const bundle = div._journeyMap;
+    if (bundle && bundle.map) {
+      try { bundle.map.remove(); } catch {}
+    }
+    div._journeyMap = null;
+  }
+}
+
 async function loadDays() {
+  // Stale-response guard (same token pattern as loadQueue): WS
+  // pushes, filter changes, and pagination can race; only the most
+  // recently requested page may render.
+  const reqId = (state.daysRequestId = (state.daysRequestId || 0) + 1);
   const q = new URLSearchParams({
     page: state.page, per_page: state.perPage,
     sort: "desc",
@@ -381,7 +416,9 @@ async function loadDays() {
   archiveKindParams(q);
 
   const data = await api("/api/archive/days?" + q);
+  if (reqId !== state.daysRequestId) return; // superseded
   const container = document.getElementById("days");
+  destroyJourneyMaps(container);
   container.innerHTML = "";
   if (!data.days.length) {
     container.innerHTML = `<p style="text-align:center;color:var(--muted)">
@@ -398,6 +435,9 @@ function renderDayCard(d) {
   const el = document.createElement("div");
   el.className = "day";
   el.dataset.day = d.day;
+  // Open days persist in state.archiveExpanded so they survive a re-render
+  // (e.g. navigating to the timeline and back, which rebuilds #days).
+  const open = state.archiveExpanded.has(d.day);
   el.innerHTML = `
     <div class="day-header">
       <h3>${d.day}</h3>
@@ -411,15 +451,26 @@ function renderDayCard(d) {
         } · ${fmtBytes(d.total_bytes)}${d.gpx_count ? " · GPS" : ""}
       </div>
     </div>
-    <div class="day-body" hidden></div>
+    <div class="day-body" ${open ? "" : "hidden"}></div>
   `;
+  const body = el.querySelector(".day-body");
   el.querySelector(".day-header").addEventListener("click", async () => {
-    const body = el.querySelector(".day-body");
-    if (!body.hidden) { body.hidden = true; return; }
+    if (!body.hidden) {
+      body.hidden = true;
+      state.archiveExpanded.delete(d.day);
+      return;
+    }
     body.hidden = false;
+    state.archiveExpanded.add(d.day);
     body.innerHTML = "<p>Loading…</p>";
     await renderDayBody(body, d.day);
   });
+  // Restore a remembered-open day: populate its body immediately. Async; the
+  // card is returned synchronously and fills in when the fetch resolves.
+  if (open) {
+    body.innerHTML = "<p>Loading…</p>";
+    renderDayBody(body, d.day);
+  }
   return el;
 }
 
@@ -444,10 +495,12 @@ async function renderDayBody(body, date) {
     }
     [data, route] = await Promise.all(promises);
   } catch (e) {
+    destroyJourneyMaps(body);
     body.innerHTML = `<p style="color:var(--err)">Failed to load: ${e}</p>`;
     return;
   }
 
+  destroyJourneyMaps(body);
   body.innerHTML = "";
 
   const journeys = (route && route.journeys) || [];
@@ -504,7 +557,7 @@ async function renderDayBody(body, date) {
 
   for (const ev of events) {
     if (ev.kind === "journey") {
-      body.appendChild(renderJourneyCard(ev.data, ev.clips, ev.idx));
+      body.appendChild(renderJourneyCard(ev.data, ev.clips, ev.idx, date));
     } else {
       body.appendChild(renderStopCard(ev.data, ev.clips, ev.idx));
     }
@@ -580,6 +633,19 @@ function fmtDuration(seconds) {
   return rem ? `${h}h ${rem}m` : `${h}h`;
 }
 
+// Clock-style H:MM:SS / M:SS — for short media lengths (exports) where
+// fmtDuration's minute rounding ("0 min" for a 40s clip) is too coarse.
+function fmtClock(seconds) {
+  if (seconds == null || !isFinite(seconds) || seconds < 0) return "—";
+  const total = Math.round(seconds);
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  const ss = String(s).padStart(2, "0");
+  if (h) return `${h}:${String(m).padStart(2, "0")}:${ss}`;
+  return `${m}:${ss}`;
+}
+
 // ETA wants sub-minute precision; fmtDuration rounds those to "0 min".
 function fmtEta(seconds) {
   if (seconds == null) return "—";
@@ -601,7 +667,7 @@ function renderStopCard(stop, clips, idx) {
     el.innerHTML = `
       <span class="stop-icon" aria-hidden="true">⏸</span>
       <span>Stopped for <strong>${fmtDuration(stop.duration_s)}</strong>
-        at <span class="stop-label">${placeLabel}</span></span>
+        at <span class="stop-label">${escHtml(placeLabel)}</span></span>
       <span class="stop-when">${startT} – ${endT}</span>
     `;
     if (!stop.label) {
@@ -624,7 +690,7 @@ function renderStopCard(stop, clips, idx) {
       <span class="journey-times">${startT} – ${endT}</span>
       <span class="stop-icon" aria-hidden="true">⏸</span>
       <strong class="journey-title">
-        <span class="stop-label">${placeLabel}</span>
+        <span class="stop-label">${escHtml(placeLabel)}</span>
       </strong>
       <span class="journey-meta">
         ${fmtDuration(stop.duration_s)} ·
@@ -672,7 +738,7 @@ function renderStopCard(stop, clips, idx) {
   return el;
 }
 
-function renderJourneyCard(j, clips, idx) {
+function renderJourneyCard(j, clips, idx, date) {
   const el = document.createElement("div");
   el.className = "journey-card collapsible";
   const mapId = `journey-map-${j.start_ts}-${idx}`;
@@ -692,13 +758,15 @@ function renderJourneyCard(j, clips, idx) {
              title="Select all clips in this journey" />
       <span class="journey-times">${startT} – ${endT}</span>
       <strong class="journey-title">
-        <span class="start-label" data-lat="${j.start_lat}" data-lon="${j.start_lon}">${startLabel}</span>
+        <span class="start-label" data-lat="${j.start_lat}" data-lon="${j.start_lon}">${escHtml(startLabel)}</span>
         <span class="journey-arrow">→</span>
-        <span class="end-label" data-lat="${j.end_lat}" data-lon="${j.end_lon}">${endLabel}</span>
+        <span class="end-label" data-lat="${j.end_lat}" data-lon="${j.end_lon}">${escHtml(endLabel)}</span>
       </strong>
       <span class="journey-meta">
         ${fmtDuration(j.duration_s)} · ${distance} · ${clips.length} clip${clips.length === 1 ? "" : "s"}
       </span>
+      <button type="button" class="journey-open-tl"
+              title="Open this journey in the timeline view">Timeline</button>
     </div>
     <div class="journey-body" hidden>
       <div id="${mapId}" class="journey-map"></div>
@@ -797,6 +865,13 @@ function renderJourneyCard(j, clips, idx) {
 
   wireJourneyToggle(el, initMap);
   wireJourneyCheck(el);
+  const tlBtn = el.querySelector(".journey-open-tl");
+  if (tlBtn) {
+    tlBtn.addEventListener("click", (e) => {
+      e.stopPropagation();              // don't toggle the card
+      location.hash = `#/timeline/${date}/${idx}`;
+    });
+  }
   return el;
 }
 
@@ -889,7 +964,7 @@ function renderClipPair(pair) {
                data-clip-id="${c.id}" data-ts="${pair.timestamp}">
         <img src="/api/archive/clip/${c.id}/thumb" data-id="${c.id}"
              alt="" loading="lazy" decoding="async" />
-        <div class="label" title="${c.basename}">${c.basename}</div>
+        <div class="label" title="${escHtml(c.basename)}">${escHtml(c.basename)}</div>
       </div>` : `<div class="thumb empty"><div class="label">—</div></div>`;
   // Kind badge: shown for parking / read-only pairs only. Driving
   // pairs are the common case so we leave them un-badged to keep
@@ -1117,6 +1192,20 @@ function setExportsPanelOpen(open) {
   toggle.querySelector(".caret").textContent = open ? "▾" : "▸";
 }
 
+// Used by the timeline editor's "View export jobs" toast action: surface the
+// Archive tab and expand the (collapsible) export-jobs panel.
+function viewExportJobs() {
+  location.hash = "#/archive";
+  setExportsPanelOpen(true);
+  // Defer the scroll: the hashchange -> routeTo that un-hides #view-archive
+  // runs after this call stack, so scrolling now (while the archive view is
+  // still hidden behind the timeline tab) would be a no-op.
+  requestAnimationFrame(() => {
+    const panel = document.getElementById("exports-panel");
+    if (panel) panel.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  });
+}
+
 document.getElementById("exports-toggle").addEventListener("click", () => {
   const open = document.getElementById("exports-toggle")
     .getAttribute("aria-expanded") === "true";
@@ -1169,13 +1258,67 @@ function updateExportsSummary(jobs) {
     : "Export jobs";
 }
 
+// App-wide transient notification. `type` is "success" (default) or "error".
+// Optional { actionLabel, onAction } renders a single inline action button.
+// Auto-dismisses after `duration` ms (errors linger longer); also closable.
+function toast(message, opts = {}) {
+  const { type = "success", actionLabel, onAction, duration } = opts;
+  const host = document.getElementById("toast-container");
+  if (!host) return;
+  const card = document.createElement("div");
+  card.className = `toast toast--${type === "error" ? "error" : "success"}`;
+  card.setAttribute("role", type === "error" ? "alert" : "status");
+
+  const msg = document.createElement("span");
+  msg.className = "toast__msg";
+  msg.textContent = message;
+  card.appendChild(msg);
+
+  if (actionLabel && typeof onAction === "function") {
+    const act = document.createElement("button");
+    act.type = "button";
+    act.className = "toast__action";
+    act.textContent = actionLabel;
+    act.addEventListener("click", () => { dismiss(); onAction(); });
+    card.appendChild(act);
+  }
+
+  const close = document.createElement("button");
+  close.type = "button";
+  close.className = "toast__close";
+  close.setAttribute("aria-label", "Dismiss");
+  close.textContent = "×";
+  close.addEventListener("click", dismiss);
+  card.appendChild(close);
+
+  host.appendChild(card);
+  // Trigger the enter transition on the next frame.
+  requestAnimationFrame(() => card.classList.add("toast--in"));
+
+  let timer = setTimeout(dismiss, duration || (type === "error" ? 7000 : 5000));
+  let gone = false;
+  function dismiss() {
+    if (gone) return;
+    gone = true;
+    clearTimeout(timer);
+    card.classList.remove("toast--in");
+    card.addEventListener("transitionend", () => card.remove(), { once: true });
+    // Fallback removal in case the transitionend never fires.
+    setTimeout(() => card.remove(), 400);
+  }
+}
+
 // Human-readable export type labels. These echo the toolbar
 // buttons: Join F/R and the PiP Fr/Rf (front-main / rear-main).
+// Display labels only. The keys are the load-bearing internal type ids used
+// in the API/DB/routing (the timeline-cut type is "timeline" on the wire);
+// this map just controls what the badge reads. Missing key -> raw id shown.
 const EXPORT_TYPE_LABELS = {
   join_front: "Join Front",
   join_rear: "Join Rear",
   pip: "PiP Fr",
   pip_rear: "PiP Rf",
+  timeline: "Timeline",
 };
 
 // Heroicons solid (MIT) — arrow-down-tray (download) + trash (delete),
@@ -1202,10 +1345,23 @@ const EXPORT_ICON_TRASH =
   '9Zm5.48.058a.75.75 0 1 0-1.498-.058l-.347 9a.75.75 0 0 0 1.5.058l.345-' +
   '9Z" clip-rule="evenodd"/></svg>';
 
+const EXPORT_ICON_PAUSE =
+  '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" ' +
+  'aria-hidden="true"><path d="M9 4.5H6.75A.75.75 0 0 0 6 5.25v13.5c0 ' +
+  '.414.336.75.75.75H9a.75.75 0 0 0 .75-.75V5.25A.75.75 0 0 0 9 4.5Zm8.25 ' +
+  '0H15a.75.75 0 0 0-.75.75v13.5c0 .414.336.75.75.75h2.25a.75.75 0 0 0 ' +
+  '.75-.75V5.25a.75.75 0 0 0-.75-.75Z"/></svg>';
+
+const EXPORT_ICON_RESUME =
+  '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" ' +
+  'aria-hidden="true"><path d="M5.25 5.653c0-1.426 1.529-2.33 2.779-1.643l' +
+  '11.54 6.348c1.295.712 1.295 2.573 0 3.285L8.029 19.99c-1.25.687-2.779-' +
+  '.217-2.779-1.643V5.653Z"/></svg>';
+
 function escapeExportText(s) {
-  const d = document.createElement("div");
-  d.textContent = String(s);
-  return d.innerHTML;
+  // Delegates to escHtml — the DOM-based version this replaced did
+  // not escape quotes, so it was unsafe in attribute contexts.
+  return escHtml(s);
 }
 
 // "15 Mar 14:30–15:02" (same day), "15 Mar – 17 Mar" (spans days),
@@ -1240,7 +1396,9 @@ function renderExportJobs(jobs) {
   table.className = "exports-table";
   table.innerHTML = `
     <thead><tr>
+      <th class="export-preview-col"></th>
       <th>Type</th><th>Status</th><th>Footage</th>
+      <th>Length</th><th>Size</th>
       <th class="exports-actions-col"></th>
     </tr></thead>
     <tbody></tbody>
@@ -1268,7 +1426,7 @@ function renderExportJobs(jobs) {
       statusCell +=
         `<span class="export-err"> · ${escapeExportText(j.error)}</span>`;
     }
-    if (j.state === "running") {
+    if (j.state === "running" || j.state === "paused") {
       const pct = progVal != null ? Math.round(progVal * 100) : 0;
       const stage = liveHit && liveHit.stage ? ` · ${liveHit.stage}` : "";
       statusCell +=
@@ -1298,24 +1456,88 @@ function renderExportJobs(jobs) {
         `${EXPORT_ICON_DOWNLOAD}</a>`
       : `<span class="export-action export-action--empty" ` +
         `aria-hidden="true"></span>`;
+    // Pause (while rendering) / Resume (while paused). Empty slot otherwise
+    // so the row's action columns stay aligned.
+    let ctrl =
+      `<span class="export-action export-action--empty" aria-hidden="true">` +
+      `</span>`;
+    if (j.state === "running") {
+      ctrl =
+        `<button type="button" class="export-action export-pause" ` +
+        `data-id="${j.id}" data-act="pause" title="Pause" ` +
+        `aria-label="Pause export">${EXPORT_ICON_PAUSE}</button>`;
+    } else if (j.state === "paused") {
+      ctrl =
+        `<button type="button" class="export-action export-resume" ` +
+        `data-id="${j.id}" data-act="resume" title="Resume" ` +
+        `aria-label="Resume export">${EXPORT_ICON_RESUME}</button>`;
+    }
     const del =
       `<button type="button" class="export-action export-delete" ` +
       `data-id="${j.id}" title="Delete" aria-label="Delete export">` +
       `${EXPORT_ICON_TRASH}</button>`;
 
+    // Filmstrip preview. A finished job whose strip is cached shows the
+    // static first frame and scrubs through the export on hover (pure CSS).
+    // A finished job whose strip is still generating shows a shimmer
+    // placeholder — still click-to-play, since the output already exists; it
+    // swaps to the real strip on the export_preview_ready event. Non-done rows
+    // get an empty cell of the same size so the columns stay aligned.
+    let previewCell;
+    if (j.state === "done" && j.has_preview) {
+      previewCell =
+        `<div class="export-thumb" data-job-id="${j.id}" title="Play export" ` +
+        `style="background-image:url(/api/exports/${j.id}/filmstrip.jpg)"></div>`;
+    } else if (j.state === "done") {
+      previewCell =
+        `<div class="export-thumb export-thumb--loading" data-job-id="${j.id}" ` +
+        `title="Play export" aria-label="Preview generating"></div>`;
+    } else {
+      previewCell =
+        `<div class="export-thumb export-thumb--empty" aria-hidden="true"></div>`;
+    }
+
+    // Output length + size, snapshotted on the row at finish. Only finished
+    // jobs have them; everything else shows an em-dash.
+    const lengthCell = j.output_duration_s != null
+      ? fmtClock(j.output_duration_s)
+      : "—";
+    const sizeCell = j.output_size != null
+      ? fmtBytes(j.output_size)
+      : "—";
+
     tr.innerHTML = `
+      <td class="export-preview">${previewCell}</td>
       <td>${typeCell}</td>
       <td class="export-status">${statusCell}</td>
       <td class="export-footage">${footageCell}</td>
-      <td class="export-actions">${dl}${del}</td>
+      <td class="export-length">${lengthCell}</td>
+      <td class="export-size">${sizeCell}</td>
+      <td class="export-actions">${dl}${ctrl}${del}</td>
     `;
     tbody.appendChild(tr);
   }
   el.appendChild(table);
+  el.querySelectorAll(".export-thumb[data-job-id]").forEach((thumb) => {
+    thumb.addEventListener("click",
+      () => openExportVideo(Number(thumb.dataset.jobId)));
+  });
   el.querySelectorAll(".export-delete").forEach((btn) => {
     btn.addEventListener("click", async () => {
       if (!confirm("Delete this export job and its output?")) return;
       await api(`/api/exports/${btn.dataset.id}`, { method: "DELETE" });
+      refreshExportJobs();
+    });
+  });
+  el.querySelectorAll(".export-pause, .export-resume").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      btn.disabled = true;
+      try {
+        await api(`/api/exports/${btn.dataset.id}/${btn.dataset.act}`,
+                  { method: "POST" });
+      } catch (err) {
+        // 409 if the job moved on (finished/failed) between render and click.
+      }
       refreshExportJobs();
     });
   });
@@ -1360,8 +1582,21 @@ function openVideo(clipId, camera, sourceEl, opts = {}) {
       if (state.autoAdvance) stepVideo(+1);
     });
   }
+  document.querySelector(".modal-nav").hidden = false;  // clip mode: show nav
   document.getElementById("modal").hidden = false;
   updateModalNav();
+}
+
+// Play a finished export in the same modal chrome (overlay, ×, Esc) as the
+// clip player, minus the clip nav — an export is a single standalone video,
+// so prev/next/camera-toggle don't apply. modalClip=null leaves the (null-safe)
+// nav handlers and arrow/F keys as no-ops.
+function openExportVideo(jobId) {
+  state.modalClip = null;
+  document.querySelector(".modal-nav").hidden = true;
+  document.getElementById("modal-body").innerHTML =
+    `<video src="/api/exports/${jobId}/video" controls autoplay></video>`;
+  document.getElementById("modal").hidden = false;
 }
 
 function updateModalNav() {
@@ -1416,6 +1651,7 @@ function toggleVideoCamera() {
 function closeModal() {
   document.getElementById("modal").hidden = true;
   document.getElementById("modal-body").innerHTML = "";
+  document.querySelector(".modal-nav").hidden = false;  // restore default
   state.modalClip = null;
 }
 
@@ -1560,7 +1796,7 @@ function renderKindBadge(it) {
   const cam = it.kind_camera || it.camera || "";
   const evt = it.kind_event || "";
   const camLabel = cam === "F" ? "Front" : cam === "R" ? "Rear" : "?";
-  const parts = [`<span class="kind-badge kind-${cam}">${camLabel}</span>`];
+  const parts = [`<span class="kind-badge kind-${escHtml(cam)}">${camLabel}</span>`];
   if (evt === "parking") {
     parts.push(`<span class="kind-badge kind-parking">Parking</span>`);
   } else if (evt === "event") {
@@ -1776,12 +2012,12 @@ function renderHourBody(day, hh, items) {
     const checked = state.queueSelected.has(it.filename);
     const kind = renderKindBadge(it);
     tr.innerHTML = `
-      <td><input type="checkbox" class="qi-check" value="${it.filename}"
+      <td><input type="checkbox" class="qi-check" value="${escHtml(it.filename)}"
             ${isPending ? "" : "disabled"}
             ${checked ? "checked" : ""} /></td>
       <td>${ts}</td>
       <td>${kind}</td>
-      <td>${it.filename}</td>
+      <td>${escHtml(it.filename)}</td>
       <td>${size}</td>
       <td class="state-${it.state}">${it.state}</td>
       <td>${it.attempts}</td>
@@ -2132,15 +2368,40 @@ for (const id of ["logs-level", "logs-logger", "logs-q"]) {
   document.getElementById(id).addEventListener("change", loadLogs);
 }
 
+let wsRetryDelayMs = 3000;
+
 function openSocket() {
-  if (state.ws) { try { state.ws.close(); } catch {} }
+  if (state.ws) {
+    // Mark the old socket so its close handler doesn't schedule a
+    // second reconnect loop alongside the new socket's.
+    state.ws._replaced = true;
+    try { state.ws.close(); } catch {}
+  }
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
-  state.ws = new WebSocket(`${proto}//${location.host}/api/progress`);
-  state.ws.addEventListener("message", (e) => {
+  const ws = new WebSocket(`${proto}//${location.host}/api/progress`);
+  state.ws = ws;
+  ws.addEventListener("open", () => {
+    wsRetryDelayMs = 3000; // healthy again — reset the backoff ladder
+    if (state.wsHadConnection) {
+      // The server's snapshot covers sync/session state but not list
+      // contents — clip_indexed / queue / export events missed while
+      // disconnected would otherwise leave these views stale.
+      refreshArchiveOnIndexChange();
+      refreshQueueIfVisible();
+      refreshExportJobs().catch(() => {});
+    }
+    state.wsHadConnection = true;
+  });
+  ws.addEventListener("message", (e) => {
     try { handleEvent(JSON.parse(e.data)); } catch {}
   });
-  state.ws.addEventListener("close", () => {
-    setTimeout(openSocket, 3000);
+  ws.addEventListener("close", () => {
+    if (ws._replaced) return;
+    // Exponential backoff with jitter: a fixed 3s retry from every
+    // open tab hammers a restarting server in lockstep.
+    const delay = wsRetryDelayMs + Math.random() * 1000;
+    wsRetryDelayMs = Math.min(wsRetryDelayMs * 2, 30000);
+    setTimeout(openSocket, delay);
   });
 }
 
@@ -2168,6 +2429,13 @@ function handleEvent(ev) {
     updateSyncState(status);
   };
   switch (ev.type) {
+    case "clip_indexed":
+      // Server re-indexed (download landed, manual rescan, import, or
+      // startup scan) and pushed this. Cheap read-only refresh — the
+      // scan already happened server-side, and this fires only on real
+      // changes, not on a timer.
+      refreshArchiveOnIndexChange();
+      break;
     case "snapshot":
       if (ev.state.sync_status) {
         applyStatus(ev.state.sync_status, ev.state.sync_status_reason);
@@ -2247,6 +2515,18 @@ function handleEvent(ev) {
         refreshExportJobs();
       }
       break;
+    case "export_preview_ready":
+      // Strip finished generating — re-render so the "generating" placeholder
+      // becomes the real hover-scrub filmstrip (has_preview now true).
+      if (!document.getElementById("view-archive").hidden) {
+        refreshExportJobs();
+      }
+      break;
+    case "export_state":   // pause/resume — reflect the new state live
+      if (!document.getElementById("view-archive").hidden) {
+        refreshExportJobs();
+      }
+      break;
     case "import_started":
     case "import_progress":
     case "import_done":
@@ -2273,7 +2553,7 @@ function updateCurrent(info) {
   const speed = info.speed ? `${fmtBytes(info.speed)}/s` : "";
   el.innerHTML = `
     <div class="current-header">
-      <strong>${info.filename}</strong>
+      <strong>${escHtml(info.filename)}</strong>
       <span class="spacer"></span>
       <button type="button" class="cancel-btn"
               title="Skip this file" aria-label="Skip this file">&times;</button>
@@ -3024,6 +3304,30 @@ window.addEventListener("hashchange", () => {
   const hide = (el) => el && el.classList.add("hidden");
   const csrfH = () => (state.csrf ? { "x-csrf-token": state.csrf } : {});
 
+  // fetch with api()'s session/CSRF semantics but raw Response
+  // semantics preserved (the import flow inspects r.ok / r.json()
+  // per file). Without this, a session expiring mid-import surfaced
+  // as opaque per-file "errors" with no login redirect, and a stale
+  // CSRF token failed the whole import with no retry.
+  async function ifetch(path, opts = {}) {
+    const send = () => fetch(path, {
+      ...opts,
+      headers: { ...(opts.headers || {}), ...csrfH() },
+      credentials: "same-origin",
+    });
+    let r = await send();
+    if (r.status === 403) {
+      const cr = await fetch("/api/auth/csrf", { credentials: "same-origin" });
+      if (cr.ok) state.csrf = (await cr.json()).csrf;
+      r = await send();
+    }
+    if (r.status === 401) {
+      showLogin();
+      throw new Error("session expired");
+    }
+    return r;
+  }
+
   $("import-btn").addEventListener("click", () => {
     hide($("import-summary")); hide($("import-progress"));
     show(modal);
@@ -3129,17 +3433,37 @@ window.addEventListener("hashchange", () => {
   $("import-upload-go").addEventListener("click", async () => {
     show($("import-progress")); hide($("import-summary"));
     const tally = {};
-    for (let i = 0; i < picked.length; i++) {
-      const { file, path } = picked[i];
-      $("import-status").textContent = `Uploading ${file.name} (${i + 1}/${picked.length})`;
-      $("import-bar").style.width = `${(i / picked.length) * 100}%`;
+
+    // Ask the server which clips are already in the archive and drop them
+    // up front, so they're never re-uploaded.
+    let queue = picked;
+    try {
+      $("import-status").textContent = "Checking for clips already imported…";
+      const r = await ifetch("/api/import/present", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          files: picked.map((p) => ({ name: p.file.name, size: p.file.size })),
+        }),
+      });
+      if (r.ok) {
+        const present = new Set((await r.json()).present || []);
+        queue = picked.filter((p) => !present.has(p.file.name));
+        if (present.size) tally.already_present = present.size;
+      }
+    } catch (_) { /* fall back to uploading everything */ }
+
+    for (let i = 0; i < queue.length; i++) {
+      const { file, path } = queue[i];
+      $("import-status").textContent = `Uploading ${file.name} (${i + 1}/${queue.length})`;
+      $("import-bar").style.width = `${(i / queue.length) * 100}%`;
       let res;
       try {
-        const r = await fetch("/api/import/upload", {
+        const r = await ifetch("/api/import/upload", {
           method: "POST",
           credentials: "same-origin",
           headers: {
-            ...csrfH(),
             "X-Import-Path": path,
             "X-Import-Size": String(file.size),
             "Content-Type": "application/octet-stream",
@@ -3160,17 +3484,17 @@ window.addEventListener("hashchange", () => {
       tally[key] = (tally[key] || 0) + 1;
     }
     $("import-bar").style.width = "100%";
-    await fetch("/api/archive/rescan", { method: "POST", credentials: "same-origin", headers: csrfH() });
+    await ifetch("/api/archive/rescan", { method: "POST" });
     renderSummary(tally);
   });
 
   // --- Folder tab ---
   $("import-folder-scan").addEventListener("click", async () => {
     const path = $("import-folder-path").value.trim() || null;
-    const r = await fetch("/api/import/scan", {
+    const r = await ifetch("/api/import/scan", {
       method: "POST",
       credentials: "same-origin",
-      headers: { ...csrfH(), "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ path }),
     });
     if (!r.ok) {
@@ -3179,8 +3503,12 @@ window.addEventListener("hashchange", () => {
       return;
     }
     const m = await r.json();
+    const newCount = m.recognised.length - (m.present_count || 0);
+    const dupNote = m.present_count
+      ? `${newCount} new, ${m.present_count} already in archive, `
+      : `${m.recognised.length} clip(s), `;
     $("import-folder-manifest").textContent =
-      `${m.recognised.length} clip(s), ${m.skipped.length} skipped, ` +
+      `${dupNote}${m.skipped_count} skipped, ` +
       `${(m.total_bytes / 1e9).toFixed(2)} GB${m.cross_volume ? " (external — copy)" : ""}.`;
     $("import-folder-go").dataset.path = path || "";
     show($("import-folder-go"));
@@ -3190,10 +3518,10 @@ window.addEventListener("hashchange", () => {
     const path = e.target.dataset.path || null;
     show($("import-progress")); hide($("import-summary"));
     $("import-status").textContent = "Starting…";
-    const r = await fetch("/api/import/ingest", {
+    const r = await ifetch("/api/import/ingest", {
       method: "POST",
       credentials: "same-origin",
-      headers: { ...csrfH(), "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ path }),
     });
     if (!r.ok) {

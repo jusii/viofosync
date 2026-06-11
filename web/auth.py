@@ -81,8 +81,22 @@ class Auth:
 
     def record_login_attempt(self, ip: str) -> None:
         """Prune old attempts and append ``now``. Raises
-        HTTPException 429 if the window is full."""
+        HTTPException 429 if the window is full.
+
+        NB: ``ip`` is ``request.client.host`` — behind a reverse
+        proxy that is the proxy's address, so the window is shared
+        across clients (a deliberate LAN-deployment trade-off; we
+        don't trust X-Forwarded-For, which is spoofable)."""
         now = time.monotonic()
+        # Sweep buckets with nothing left inside the window so the
+        # map can't grow unbounded from one-shot attempts by IPs that
+        # never return.
+        stale = [
+            k for k, b in self._login_attempts.items()
+            if not b or now - b[-1] > LOGIN_WINDOW_SECONDS
+        ]
+        for k in stale:
+            del self._login_attempts[k]
         bucket = self._login_attempts.setdefault(ip, deque())
         while bucket and now - bucket[0] > LOGIN_WINDOW_SECONDS:
             bucket.popleft()

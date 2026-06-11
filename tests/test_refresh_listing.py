@@ -147,3 +147,42 @@ async def test_refresh_returns_false_on_listing_exception(
     assert ok is False
     # Queue is untouched.
     assert _queue_rows(db) == []
+
+
+# ---- event-loop responsiveness ----
+
+async def test_refresh_does_not_block_event_loop(db: Database) -> None:
+    """The NAS directory walk + queue reconcile are blocking I/O and
+    must run off the loop — a slow recordings volume used to freeze
+    every HTTP request and WebSocket for its duration."""
+    import asyncio
+    import time
+
+    provider = MagicMock()
+    provider.get.return_value = _make_snap()
+    worker = SyncWorker(db, provider, Hub())
+
+    def _slow_present():
+        time.sleep(0.3)  # simulate a slow NAS walk
+        return []
+
+    ticks = 0
+
+    async def _ticker():
+        nonlocal ticks
+        while True:
+            await asyncio.sleep(0.02)
+            ticks += 1
+
+    t = asyncio.create_task(_ticker())
+    try:
+        with patch.object(worker, "_fetch_listing", return_value=[_Rec("A.MP4")]), \
+             patch.object(worker, "_present_filenames", side_effect=_slow_present):
+            await worker._refresh_listing_and_reconcile()
+    finally:
+        t.cancel()
+
+    # With the walk on the loop the ticker barely runs (~0-2 ticks);
+    # off the loop it accumulates ~15. Threshold splits them cleanly.
+    assert ticks >= 5, f"event loop starved during reconcile ({ticks} ticks)"
+    assert _queue_rows(db) == [("A.MP4", "pending")]

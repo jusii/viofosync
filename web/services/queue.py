@@ -102,6 +102,16 @@ def reconcile(
                         ),
                     )
                     marked_done += 1
+                elif existing[filename]["state"] in ("pending", "failed"):
+                    # The clip got onto disk by another path (bulk import,
+                    # manual copy) after it was queued. Heal the stale row
+                    # instead of re-downloading a file we already have.
+                    c.execute(
+                        "UPDATE download_queue SET state='done', "
+                        "finished_at=? WHERE filename=?",
+                        (now, filename),
+                    )
+                    marked_done += 1
                 continue
 
             if filename in existing:
@@ -666,8 +676,9 @@ def retry_failed(db: Database) -> int:
 
 
 def emit_queue_changed(db: Database, hub, *, loop=None) -> None:
-    """Broadcast queue_changed; ``loop`` required when calling from
-    a non-loop thread (sync_worker download thread)."""
+    """Broadcast queue_changed from any caller context. Off-loop
+    callers may pass ``loop``; otherwise the hub's bound loop is
+    used (threadpool route handlers used to drop the event here)."""
     if hub is None:
         return
     with db.conn() as c:
@@ -682,10 +693,10 @@ def emit_queue_changed(db: Database, hub, *, loop=None) -> None:
     event = {"type": "queue_changed", **counts}
     import asyncio as _asyncio
     try:
-        running = _asyncio.get_running_loop()
-        running.create_task(hub.broadcast(event))
+        _asyncio.get_running_loop()
+        from . import tasks as _tasks
+        _tasks.spawn(hub.broadcast(event), name="queue-changed-broadcast")
         return
     except RuntimeError:
         pass
-    if loop is not None:
-        hub.schedule_broadcast(loop, event)
+    hub.schedule_broadcast(loop, event)

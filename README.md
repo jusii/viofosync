@@ -1,30 +1,47 @@
 # viofosync
 
+![CI](https://github.com/RobXYZ/viofosync/actions/workflows/ci.yml/badge.svg) ![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg) ![Docker](https://img.shields.io/docker/pulls/robxyz/viofosync)
+
 Self-hosted web app for syncing, browsing, and exporting recordings from a Viofo dashcam (tested with the A229 Pro) over Wi-Fi. Runs as a single Docker container on a NAS or any always-on host on the same network as the dashcam.
 
-> **v2 is a full rewrite.** v1 was a cron-driven CLI based on [BlackVueSync](https://github.com/acolomba/BlackVueSync). v2 uses the same dashcam protocol but ships a web UI, journey-detected GPS maps, ffmpeg exports, JSON-backed settings, a first-run setup wizard, and a UI-driven download manager. The v1 cron CLI is preserved on the `main` branch.
-
-![Download manager](screenshots/download_manager.png)
+> **v2 is a full rewrite.** v1 was a cron-driven CLI based on [BlackVueSync](https://github.com/acolomba/BlackVueSync). v2 uses the same dashcam protocol but ships a web UI, journey-detected GPS maps, a timeline video editor, ffmpeg exports, JSON-backed settings, a first-run setup wizard, and a UI-driven download manager. The v1 cron CLI is preserved on the `main` branch.
 
 ## Features
 
-- **Archive browser** — clips grouped by day, paired front/rear, in-browser playback.
-- **GPS journeys** — clickable map per trip with auto-split stops and reverse-geocoded place names.
-- **Exports** — original clips, joined front/rear or picture-in-picture videos via ffmpeg.
-- **Download manager** — live progress with session speed and ETA, a reorderable queue.
-- **Auto-delete from dashcam** *(optional)* — frees SD card space once a clip is safely downloaded.
-- **Settings page** — runtime settings hot-reload; no Docker env vars to fiddle with.
-- **Home Assistant support** — auto-discovered sensors and buttons via MQTT.
+- **Automatic Wi-Fi sync** - clips copy from the dashcam in your car when it joins your home wi-fi.
+- **Archive browser** -  clips grouped by day, played in your browser. Nothing to install on your phone or laptop.
+- **Journey maps** - automatic journey detection with each trip shown on a map with stops detected and place names looked up automatically.
+- **Video editor** - trim clips and cut between the front and rear cameras, then export a single video.
+- **Flexible exports** - original clips, joined front/rear, picture-in-picture, or edited cuts; hardware-accelerated where your system supports it.
+- **Storage management** - set a size or age limit and the oldest footage is pruned to fit; optional auto-delete clears the camera's SD card once a clip is safely saved.
+- **Easy browser-based setup** - a first-run wizard, then a settings page.
+- **Home Assistant support** - over MQTT, with sync status, alerts, and action buttons.
 
-## Hardware
+![Timeline video editor](screenshots/timeline_editor.webp)![Download manager](screenshots/download_manager.webp)
 
-The dashcam must stay powered on and connected to Wi-Fi. A hardwire kit (e.g. Viofo HK4) plus a dedicated dashcam battery is recommended.
+## Contents
 
-It should join your LAN in Wi-Fi **station** mode. As of May 2026 the official A229 Pro firmware does not retain Wi-Fi state across reboots but Viofo support will provide a custom firmware on request.
+- [Features](#features)
+- [Getting started](#getting-started)
+- [Configuration](#configuration)
+- [Home Assistant](#home-assistant-via-mqtt)
+- [Reference](#reference)
+- [About](#about)
 
-Reserve the dashcam's IP on your router so it doesn't change.
+## Getting started
 
-## Quick start
+### Requirements
+
+> [!NOTE]
+> #### Most users will need
+> - **Viofo Wi-Fi dashcam** connected to your LAN in station mode
+> - **Viofo special firmware** to keep station mode always-on (supplied by Viofo support on request)
+> - **Hardwire kit** (Viofo HK4) to keep the camera powered when parked - a dedicated dashcam battery is recommended for extended downloads
+> - **Reserved IP** for the dashcam on your router, so it doesn't change
+> - **NAS or always-on host** with large storage that can run Docker
+> - **Optional: hardware video encoder + fast LAN** - recommended for the video editing features
+
+### Quick start
 
 ```bash
 docker run -d \
@@ -39,11 +56,35 @@ docker run -d \
   robxyz/viofosync
 ```
 
+Or use the included `[docker-compose.yml](docker-compose.yml)`, which has the same settings plus a commented-out GPU passthrough block (see below).
+
 Open `http://<host>:8080` and the first boot redirects you to a one-screen setup wizard at `/setup`. Enter the dashcam IP and an admin password (12+ characters) to finish. The wizard writes `/config/config.json` with a freshly-generated `SESSION_SECRET` and a bcrypt hash of the password — neither is held in env vars or the image.
 
 After setup, every other setting lives on the **Settings** page in the UI.
 
 > ⚠ **Setup window safety.** Until the wizard is submitted there is no auth on the container — the wizard self-disables after first submission and the route returns 404 thereafter. Don't expose the container to the public internet during this window.
+
+### Hardware-accelerated exports
+
+Exports (join, picture-in-picture, switched) and thumbnails use ffmpeg. At startup the app probes the host's encoders — QuickSync (Intel iGPU), VAAPI, NVENC, VideoToolbox — and falls back to software (libx264) if none work, so exports always run.
+
+To use an Intel iGPU, pass the render node through:
+
+```bash
+docker run ... --device /dev/dri:/dev/dri robxyz/viofosync
+```
+
+The entrypoint auto-detects the render node's group and adds the app user to it. Some hosts (notably Synology DSM) need the group granted explicitly — find the GID and add it:
+
+```bash
+docker exec <container> sh -c 'stat -c %g /dev/dri/renderD128'   # often 937 on Synology
+# docker run ... --group-add 937   (or group_add: ["937"] in docker-compose.yml)
+```
+
+Confirm it engaged with `docker exec <container> vainfo`, and check the startup log for `export encoder available: … qsv …`.
+
+> [!NOTE]
+> On arm64 hosts QuickSync won't probe-pass; exports degrade to VAAPI or software automatically.
 
 ## Configuration
 
@@ -58,7 +99,7 @@ App-level settings (sync interval, dashcam IP, encoder, geocoding email, web por
 
 ### Importing without Wi-Fi
 
-Use **Import manually** in the web UI to ingest clips you already have on disk. Two modes:
+Use **Import manually** in the web UI to ingest clips you already have on disk or the SD card. Two modes:
 
 - **Upload** — pick a folder in your browser; clips upload one at a time and slot straight into the archive. On a quota-bound archive it makes room as it goes, evicting the oldest clips (never anything newer than what you're importing).
 - **Folder** — copy clips into the `import` folder inside your recordings share, then **Scan** → **Ingest**. By default this is `recordings/import`; for a one-off import from a different path, type it in the Import dialog's Folder tab, or set a persistent default via the advanced `IMPORT_PATH` key in `/config/config.json`.
@@ -74,16 +115,14 @@ The source is only ever **read** — originals on the card/USB are never deleted
 
 Imported clips are recognised by Viofo naming (`YYYY_MMDD_HHMMSS_NNNN[event][cam].MP4`); locked clips under an `RO/` folder keep their protected status. Non-matching files are left untouched.
 
-## Alternative camera address
+### Alternative camera address
 
-You can set an optional **Alternative address** (Settings → Dashcam) — a second IP/host for the **same** dashcam. It is **not** for a second camera.
+You can set an optional **Alternative address** (Settings → Dashcam) for the **same** dashcam.
 
-This is for reaching one camera at more than one address depending on where the car is, for example:
+This can be useful for reaching the camera on a second network:
 
-- A Raspberry Pi running a VPN hotspot, so you can reach the dashcam remotely when the car is away from home.
+- A Raspberry Pi running a VPN hotspot in the car, so you can reach the dashcam remotely.
 - A site-to-site VPN to a second location the car is regularly parked at, where the camera sits on a different subnet/IP.
-
-The alternative uses the same form as the primary (IP or hostname, plain `http`, port 80).
 
 ## Home Assistant via MQTT
 
@@ -115,15 +154,17 @@ For "prioritize the last N hours", publish to `{node_id}/cmd/prioritize_recent` 
 
 - The MQTT password is stored in `config.json` in plaintext, alongside the bcrypt hash of the admin password and the session secret. The same access controls already apply to that file.
 
-## Reverse geocoding
+## Reference
+
+### Reverse geocoding
 
 Journey and stop cards display their start/end as *"Street, Town"* via Nominatim (OpenStreetMap). Lookups are rate-limited to 1/second per [Nominatim's usage policy](https://operations.osmfoundation.org/policies/nominatim/) and cached in the `geocode_cache` table (coords rounded to 3 d.p., ≈110 m). Set **Nominatim email** in Settings → GPS & Geocoding to identify your install per OSM's terms; toggle the **GPS maps** filter off on the Archive page to skip the Leaflet + Nominatim machinery entirely for low-bandwidth browsing.
 
-## XML vs HTML listing
+### XML vs HTML listing
 
 By default the app scrapes the dashcam's HTML directory listings (`/DCIM/Movie`, `/DCIM/Movie/Parking`, `/DCIM/Movie/RO`), which is noticeably faster on some firmware than the XML API (`/?custom=1&cmd=3015&par=1`). Toggle off **Use HTML directory listing** in Settings → Dashcam to fall back to XML.
 
-## Migrating from v1
+### Migrating from v1
 
 Existing installs with a `viofosync.env` file are migrated automatically on first boot of the v2 image:
 
@@ -133,7 +174,7 @@ Existing installs with a `viofosync.env` file are migrated automatically on firs
 
 `PUID` / `PGID` / `TZ` env vars work the same as v1.
 
-## Running without Docker
+### Running without Docker
 
 For development or for hosts that don't have Docker:
 
@@ -145,16 +186,18 @@ CONFIG_DIR=/path/to/config RECORDINGS=/path/to/archive \
 
 `web.launcher` reads `WEB_HOST` / `WEB_PORT` from `config.json` (defaults `0.0.0.0:8080`) and re-execs into uvicorn. On first run, browse to `http://localhost:8080/setup`. `ffmpeg` must be on `$PATH` for thumbnails and exports.
 
-## AI Code
+## About
 
-This opensource project uses AI generated code and is intended for personal home use. It is not recommended that the server is exposed to the public internet.
+### AI Code
 
-## Credits
+viofosync is an open-source project built with substantial AI assistance, intended for personal use on a home network. Its security model assumes a trusted LAN - a single password over plain HTTP - so keep it behind your network or a VPN rather than exposing it directly to the public internet.
+
+### Credits
 
 The GPX extraction logic uses the method described at [https://sergei.nz/extracting-gps-data-from-viofo-a119-and-other-novatek-powered-cameras/](https://sergei.nz/extracting-gps-data-from-viofo-a119-and-other-novatek-powered-cameras/).
 
 This software is unaffiliated with Viofo or any other vendor.
 
-## License
+### License
 
 MIT — see [LICENSE](LICENSE).

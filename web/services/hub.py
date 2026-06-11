@@ -26,6 +26,23 @@ from .sync_status import compute_sync_status
 
 log = logging.getLogger("viofosync.hub")
 
+# Per-client send budget. A client with a stalled TCP window (zombie
+# tab, closed laptop lid) doesn't error — send just backpressures
+# forever, which used to serialize every other client's events behind
+# it while pending broadcasts piled up on the loop. A client that
+# can't take an event within this window is treated as dead.
+SEND_TIMEOUT_S = 2.0
+
+
+async def _send_with_timeout(ws: WebSocket, event: Dict[str, Any]) -> bool:
+    """Send one event; False means the client is dead/stalled and
+    should be evicted."""
+    try:
+        await asyncio.wait_for(ws.send_json(event), timeout=SEND_TIMEOUT_S)
+        return True
+    except Exception:
+        return False
+
 
 class Hub:
     def __init__(self, settings_provider: Any = None, session: Any = None) -> None:
@@ -33,6 +50,10 @@ class Hub:
         self._lock = asyncio.Lock()
         self._settings_provider = settings_provider
         self._session = session
+        # Bound in lifespan; schedule_broadcast falls back to this so
+        # threadpool callers (sync route handlers) don't need to
+        # thread a loop reference through every call site.
+        self._loop: asyncio.AbstractEventLoop | None = None
         # Last broadcast session_stats key, for deduping the follow-up.
         self._last_session_key: Any = None
         # Retain the last snapshot of major state so a newly-
@@ -141,9 +162,7 @@ class Hub:
         async with self._lock:
             clients = list(self._clients)
         for ws in clients:
-            try:
-                await ws.send_json(event)
-            except Exception:
+            if not await _send_with_timeout(ws, event):
                 dead.append(ws)
         # Recompute the unified status after the state mutation above.
         await self._maybe_emit_sync_status(dead)
@@ -181,9 +200,7 @@ class Hub:
         async with self._lock:
             clients = list(self._clients)
         for ws in clients:
-            try:
-                await ws.send_json(event)
-            except Exception:
+            if not await _send_with_timeout(ws, event):
                 dead.append(ws)
 
     def _feed_session(self, t: str, event: Dict[str, Any]) -> None:
@@ -249,18 +266,25 @@ class Hub:
         async with self._lock:
             clients = list(self._clients)
         for ws in clients:
-            try:
-                await ws.send_json(event)
-            except Exception:
+            if not await _send_with_timeout(ws, event):
                 dead.append(ws)
+
+    def bind_loop(self, loop: asyncio.AbstractEventLoop) -> None:
+        """Remember the app's event loop (called once in lifespan)."""
+        self._loop = loop
 
     def schedule_broadcast(
         self,
-        loop: asyncio.AbstractEventLoop,
+        loop: asyncio.AbstractEventLoop | None,
         event: Dict[str, Any],
     ) -> None:
-        """Thread-safe entry point: used from the downloader
-        worker thread, which doesn't own the event loop."""
+        """Thread-safe entry point: used from worker threads and
+        threadpool route handlers, which don't own the event loop.
+        ``loop`` may be None — the loop bound in lifespan is used."""
+        loop = loop or self._loop
+        if loop is None:
+            log.warning("no event loop bound, dropping event %s", event)
+            return
         try:
             asyncio.run_coroutine_threadsafe(
                 self.broadcast(event), loop

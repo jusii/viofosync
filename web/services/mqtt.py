@@ -128,7 +128,7 @@ async def _publish_entity_attrs(client, cfg, entity, hub, db, snap,
     if entity.attrs_fn is None:
         return
     try:
-        attrs = entity.attrs_fn(hub, db, snap)
+        attrs = await asyncio.to_thread(entity.attrs_fn, hub, db, snap)
     except Exception:
         log.exception("mqtt: attrs_fn raised for %s", entity.object_id)
         return
@@ -171,6 +171,21 @@ class MqttService:
         self._detail: Optional[str] = None
         self._last_published_at: Optional[float] = None
         self._coalescer = PublishCoalescer()
+        # Current discovery topology, so on_settings_changed can
+        # publish cleanup deletes against the OLD topics when the
+        # node id / prefix change. Owned here — previously poked in
+        # from lifespan, which any other constructor caller forgot.
+        self._last_node_id: Optional[str] = None
+        self._last_discovery_prefix: Optional[str] = None
+        if provider is not None:
+            try:
+                snap = provider.get()
+                self._last_node_id = getattr(snap, "mqtt_node_id", None)
+                self._last_discovery_prefix = getattr(
+                    snap, "mqtt_discovery_prefix", None,
+                )
+            except Exception:  # pragma: no cover — defensive
+                pass
 
     # ---- status ----
 
@@ -187,6 +202,12 @@ class MqttService:
         }
 
     BACKOFF_STEPS = (1.0, 2.0, 5.0, 15.0, 60.0)
+    # A connection that survived at least this long counts as stable:
+    # the next reconnect starts back at the first backoff step.
+    # Without this, backoff_idx only ever grew over the process
+    # lifetime — a handful of blips spread across weeks pushed every
+    # future reconnect to the full 60s wait.
+    STABLE_RESET_S = 60.0
 
     def start(self) -> None:
         if self._task is not None and not self._task.done():
@@ -244,21 +265,51 @@ class MqttService:
             if not cfg["host"]:
                 self._set_state(ConnState.IDLE, detail="MQTT_HOST not set")
                 return
+            attempt_started = time.monotonic()
             try:
                 self._set_state(ConnState.CONNECTING,
                                 detail=f"{cfg['host']}:{cfg['port']}")
                 await self._connect_and_loop(aiomqtt, cfg)
-                backoff_idx = 0
             except asyncio.CancelledError:
                 raise
             except aiomqtt.MqttError as e:
                 log.warning("mqtt: connection lost (%s); reconnecting", e)
                 self._set_state(ConnState.RECONNECTING, detail=str(e))
+            except BaseExceptionGroup as eg:
+                # _connect_and_loop runs its workers in an asyncio.TaskGroup,
+                # which reports a task failure as an ExceptionGroup — never
+                # the bare error. A routine broker disconnect therefore
+                # arrives here wrapped (e.g. an aiomqtt.MqttError
+                # "Disconnected during message iteration"); the old
+                # `except aiomqtt.MqttError` missed the group, so a normal
+                # reconnect was logged as a fatal "unexpected error" with the
+                # state set to ERROR instead of RECONNECTING. Cancellation is
+                # normally delivered bare (caught above), but honour it here
+                # too so shutdown is never swallowed as an error.
+                cancelled, eg = eg.split(asyncio.CancelledError)
+                if cancelled is not None:
+                    raise asyncio.CancelledError
+                mqtt_errs, others = eg.split(aiomqtt.MqttError)
+                if others is None:
+                    msg = "; ".join(str(e) for e in mqtt_errs.exceptions)
+                    log.warning("mqtt: connection lost (%s); reconnecting", msg)
+                    self._set_state(ConnState.RECONNECTING, detail=msg)
+                else:
+                    log.error("mqtt: unexpected error", exc_info=others)
+                    self._set_state(
+                        ConnState.ERROR,
+                        detail="; ".join(str(e) for e in others.exceptions),
+                    )
             except Exception as e:
                 log.exception("mqtt: unexpected error")
                 self._set_state(ConnState.ERROR, detail=str(e))
             if self._stop.is_set():
                 break
+            # _connect_and_loop only exits by raising, so a "success"
+            # reset is unreachable — instead, a connection that held
+            # for STABLE_RESET_S earns a fresh backoff ladder.
+            if time.monotonic() - attempt_started >= self.STABLE_RESET_S:
+                backoff_idx = 0
             delay = self.BACKOFF_STEPS[min(backoff_idx, len(self.BACKOFF_STEPS) - 1)]
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=delay)
@@ -334,7 +385,11 @@ class MqttService:
             if entity.state_fn is None:
                 continue
             try:
-                value = entity.state_fn(self._hub, self._db, snap)
+                # state_fns can block (disk_used walks the archive in
+                # quota mode) — keep them off the event loop.
+                value = await asyncio.to_thread(
+                    entity.state_fn, self._hub, self._db, snap
+                )
             except Exception:
                 log.exception("mqtt: state_fn raised for %s", entity.object_id)
                 continue
@@ -393,6 +448,12 @@ class MqttService:
         original_schedule = self._hub.schedule_broadcast
 
         def _intercepting_schedule(running_loop, event: dict) -> None:
+            # Mirror Hub.schedule_broadcast: callers may pass None and
+            # rely on the loop bound in lifespan.
+            running_loop = running_loop or getattr(self._hub, "_loop", None)
+            if running_loop is None:
+                log.warning("no event loop bound, dropping event %s", event)
+                return
             try:
                 asyncio.run_coroutine_threadsafe(
                     _intercepting_broadcast(event), running_loop,
@@ -414,7 +475,9 @@ class MqttService:
                     if entity.state_fn is None:
                         continue
                     try:
-                        value = entity.state_fn(self._hub, self._db, snap)
+                        value = await asyncio.to_thread(
+                            entity.state_fn, self._hub, self._db, snap
+                        )
                     except Exception:
                         log.exception("mqtt: state_fn raised for %s",
                                        entity.object_id)
@@ -552,7 +615,11 @@ class MqttService:
                 if entity.object_id not in ("disk_used", "dashcam"):
                     continue
                 try:
-                    value = entity.state_fn(self._hub, self._db, snap)
+                    # disk_used walks the whole archive in quota mode —
+                    # on the loop this froze the server once a minute.
+                    value = await asyncio.to_thread(
+                        entity.state_fn, self._hub, self._db, snap
+                    )
                 except Exception:
                     log.exception("mqtt: state_fn raised for %s",
                                    entity.object_id)

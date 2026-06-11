@@ -303,3 +303,56 @@ async def test_hub_compute_exception_does_not_break_broadcast() -> None:
     assert any(e.get("type") == "dashcam_online" for e in ws.sent)
     # No sync_status follow-up.
     assert not any(e.get("type") == "sync_status" for e in ws.sent)
+
+
+# ---- regression: one stalled client must not block the others ----
+
+class _StalledWS:
+    """send_json applies indefinite backpressure (zombie tab, closed
+    laptop lid) — it never raises, it just never completes."""
+
+    def __init__(self):
+        self.accept_calls = 0
+
+    async def accept(self) -> None:
+        self.accept_calls += 1
+
+    async def send_json(self, _payload) -> None:
+        import asyncio
+        await asyncio.sleep(60)
+
+
+class _HealthyWS:
+    def __init__(self):
+        self.received: list = []
+
+    async def accept(self) -> None:
+        pass
+
+    async def send_json(self, payload) -> None:
+        self.received.append(payload)
+
+
+async def test_stalled_client_does_not_block_broadcast(monkeypatch) -> None:
+    import asyncio
+    import time
+
+    import web.services.hub as hub_mod
+
+    monkeypatch.setattr(hub_mod, "SEND_TIMEOUT_S", 0.1, raising=False)
+    hub = Hub()
+    stalled = _StalledWS()
+    healthy = _HealthyWS()
+    hub._clients.update({stalled, healthy})
+
+    started = time.monotonic()
+    await asyncio.wait_for(
+        hub.broadcast({"type": "ping"}), timeout=2.0,
+    )
+    elapsed = time.monotonic() - started
+
+    assert {"type": "ping"} in healthy.received, \
+        "healthy client starved by a stalled one"
+    assert elapsed < 1.5
+    assert stalled not in hub._clients, "stalled client not evicted"
+    assert healthy in hub._clients

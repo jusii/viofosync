@@ -4,7 +4,13 @@
    * the accent without reading as "tinted". The accent is a saturated
    * cobalt; all chrome (active nav, focus rings, progress, selection,
    * map polyline, primary CTAs) routes through it. */
-  --bg: oklch(0.15 0.008 250);
+  /* Lifted off near-black: at oklch(0.15) (≈#0b0d10) the GPU dithers the dark
+   * fill into a faint two-tone stripe (≈#090b0e/#0d0f11) across large bare-bg
+   * areas (login, open export panel). Raising it a few levels clears the
+   * near-black dithering zone while staying clearly darker than --panel, so
+   * cards still read as lighter surfaces. Flat sRGB hex (keeps a faint blue
+   * tint: blue > red); --panel* stay oklch — they're lighter and don't band. */
+  --bg: #15171c;
   --panel: oklch(0.20 0.010 250);
   --panel-2: oklch(0.25 0.012 250);
   --panel-3: oklch(0.30 0.014 250);
@@ -426,6 +432,7 @@ main {
 .exports-table tbody tr:hover { background: var(--panel-2); }
 .state-queued   { color: var(--muted); }
 .state-running  { color: var(--accent); }
+.state-paused   { color: var(--warn, #d8a200); }
 .state-cancelled { color: var(--warn); }
 
 /* Type badge — small accent-tinted pill. */
@@ -468,6 +475,12 @@ main {
 /* Footage cell — date range + clip count. */
 .export-footage { white-space: nowrap; }
 .export-count { color: var(--muted); }
+/* Length + size: compact numeric columns, aligned figures. */
+.export-length, .export-size {
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
 
 /* Actions — right-aligned icon buttons; the trailing delete button
  * lines up in a column across rows, with download just left of it. */
@@ -1496,7 +1509,7 @@ main {
   }
   .exports-table-wrap,
   .exports-panel { overflow-x: auto; }
-  .exports-table { min-width: 520px; }
+  .exports-table { min-width: 620px; }
 
   /* Downloads breakdown pills wrap below the date instead of
    * crowding the row. */
@@ -1898,3 +1911,293 @@ main {
 }
 .import-launch:hover { background: var(--accent-18); border-color: var(--accent); }
 .import-launch svg { flex-shrink: 0; }
+
+/* ---------- Timeline view ---------- */
+#view-timeline { display: flex; flex-direction: column; gap: 10px;
+  --tl-label-w: 86px; --tl-gap: 8px;
+  /* Fill the viewport below the app header (92px) + main padding (16+16). */
+  min-height: calc(100vh - 124px);
+  min-height: calc(100dvh - 124px); }
+.tl-track-head .tl-track-label { width: auto; flex: 1 1 auto; min-width: 0;
+  padding-left: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tl-head { display: flex; align-items: center; gap: 12px; }
+.tl-back { font-size: 20px; color: var(--accent); text-decoration: none; line-height: 1; }
+.tl-title { font-weight: 600; }
+.tl-map-toggle { margin-left: auto; }
+.tl-stage { display: flex; gap: 0; background: #000; border: 1px solid var(--border);
+  border-radius: 10px; overflow: hidden; min-height: 240px;
+  flex: 1 1 auto; }   /* grow to fill the viewport-height section */
+.tl-preview { flex: 3 1 0; position: relative; display: flex; align-items: center;
+  justify-content: center; background: #000; min-height: 240px; }
+/* Absolutely positioned so the video's intrinsic aspect-ratio height never
+   drives the flex column taller than the viewport (it only fills its box). */
+.tl-preview video { position: absolute; inset: 0; width: 100%; height: 100%;
+  object-fit: contain; }
+.tl-preview-empty { color: var(--muted); font-size: 13px; letter-spacing: .04em; }
+/* Grow into the horizontal space the letterboxed video leaves unused,
+   while the preview (flex 3) stays the dominant pane. */
+.tl-map { flex: 2 1 0; min-width: 300px; max-width: 640px;
+  border-left: 1px solid var(--border); }
+.tl-stage.map-hidden .tl-map, .tl-stage.no-map .tl-map { display: none; }
+.tl-transport { display: flex; align-items: center; gap: 12px; }
+.tl-play { width: 34px; height: 34px; border-radius: 50%; padding: 0; }
+.tl-tc { font-variant-numeric: tabular-nums; color: var(--text); }
+.tl-spacer { flex: 1; }
+.tl-zbtn { width: 30px; height: 30px; padding: 0; }
+.tl-ruler { position: relative; height: 18px; color: var(--muted);
+  font-size: 11px; font-variant-numeric: tabular-nums; }
+.tl-tick { position: absolute; transform: translateX(-50%); white-space: nowrap; }
+/* Anchor the end labels inward so they don't clip at the edges. */
+.tl-tick:first-child { transform: none; }
+.tl-tick:last-child { transform: translateX(-100%); }
+.tl-tracks { position: relative; background: var(--panel); border: 1px solid var(--border);
+  border-radius: 8px; padding: 8px 0; overflow: hidden; touch-action: none;
+  user-select: none; min-height: 60px; }
+.tl-track { display: flex; align-items: center; gap: var(--tl-gap); height: 54px; }
+.tl-track-label { width: var(--tl-label-w); flex: none; padding-left: 8px;
+  color: var(--muted); font-size: 11px; font-weight: 700; letter-spacing: .04em; }
+.tl-strip { position: relative; flex: 1; height: 48px; overflow: hidden;
+  border-radius: 5px; background: var(--bg); }
+.tl-clip { position: absolute; top: 0; height: 48px; border-right: 1px solid var(--bg);
+  background-color: var(--panel-2); background-repeat: no-repeat; background-position: 0 0; }
+.tl-clip.has-strip { background-color: transparent; }
+/* Placeholder while the filmstrip generates: the clip thumbnail (set as the
+   block background) under a dim + shimmer overlay that fades out once the
+   real strip loads. */
+.tl-clip.tl-ph::after {
+  content: ""; position: absolute; inset: 0; pointer-events: none;
+  background:
+    linear-gradient(rgba(0, 0, 0, .35), rgba(0, 0, 0, .35)),
+    linear-gradient(100deg, transparent 35%, rgba(255, 255, 255, .16) 50%,
+                    transparent 65%);
+  background-size: 100% 100%, 220% 100%;
+  background-repeat: no-repeat;
+  opacity: 0; transition: opacity .35s ease;
+}
+.tl-clip.tl-ph.loading::after {
+  opacity: 1;
+  animation: tl-shimmer 1.2s linear infinite;
+}
+@keyframes tl-shimmer {
+  from { background-position: 0 0, -110% 0; }
+  to   { background-position: 0 0, 210% 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .tl-clip.tl-ph.loading::after { animation: none; }
+}
+.tl-playhead { position: absolute; top: 4px; bottom: 4px; width: 2px;
+  left: calc(var(--tl-label-w) + var(--tl-gap));
+  background: #fff; box-shadow: 0 0 6px #fff; pointer-events: auto;
+  cursor: ew-resize; z-index: 5; }
+.tl-empty { color: var(--muted); font-size: 13px; padding: 16px; }
+.journey-open-tl { margin-left: 8px; background: var(--accent);
+  color: var(--on-accent); border: 1px solid var(--accent); border-radius: 6px;
+  padding: 4px 12px; font-weight: 600; cursor: pointer; }
+.journey-open-tl:hover { background: var(--accent-85); border-color: var(--accent-85); }
+
+/* Timeline: stack preview over map on narrow screens */
+@media (max-width: 640px) {
+  .tl-stage { flex-direction: column; }
+  .tl-map { flex: none; width: 100%; height: 200px; border-left: none;
+    border-top: 1px solid var(--border); }
+  #view-timeline { --tl-label-w: 72px; }
+  .tl-track-label { font-size: 10px; }
+}
+
+/* ---------- Timeline editor (Phase 3B) ---------- */
+/* .tl-sel / .tl-switch share the playhead's left origin (the label
+   gutter) so they align with the clip strips and the playhead. */
+.tl-sel { position: absolute; top: 2px; bottom: 2px; z-index: 3;
+  left: calc(var(--tl-label-w) + var(--tl-gap));
+  border-left: 2px solid var(--accent); border-right: 2px solid var(--accent);
+  pointer-events: none; }
+.tl-switch { position: absolute; top: 0; bottom: 0; width: 0; z-index: 4;
+  left: calc(var(--tl-label-w) + var(--tl-gap));
+  border-left: 2px dashed #fff; pointer-events: none; }
+.tl-switch-grip { position: absolute; top: 50%; left: -10px;
+  transform: translateY(-50%); width: 20px; height: 20px; background: #fff;
+  color: #10131a; border-radius: 5px; font-size: 12px; text-align: center;
+  line-height: 20px; pointer-events: auto; cursor: ew-resize; }
+/* Delete badge above the grip: removes the switch (merges the two segments). */
+.tl-switch-del { position: absolute; top: 2px; left: -9px; width: 18px;
+  height: 18px; background: var(--err-text, #ff5a5a); color: #fff;
+  border-radius: 50%; font-size: 13px; text-align: center; line-height: 17px;
+  pointer-events: auto; cursor: pointer; opacity: .85; }
+.tl-switch-del:hover { opacity: 1; }
+/* Per-segment shading overlays inside each track strip. */
+.tl-ov { position: absolute; top: 0; bottom: 0; pointer-events: none; z-index: 1; }
+.tl-ov-dim { background: rgba(0, 0, 0, 0.7); }
+.tl-ov-outside { background: rgba(0, 0, 0, 0.85); }
+.tl-track.tl-active .tl-track-label { color: var(--ok); }
+.tl-track.tl-disabled { height: 20px; }
+.tl-track.tl-disabled .tl-strip { opacity: .25; filter: grayscale(1); height: 16px; }
+.tl-track.tl-disabled .tl-track-label { color: var(--muted); }
+.tl-actions { display: flex; align-items: center; gap: 8px 14px; flex-wrap: wrap;
+  padding: 12px 2px 2px; }
+.tl-grp { display: flex; align-items: center; gap: 6px; }
+.tl-abtn { padding: 5px 11px; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--panel-2); color: var(--text); font-size: 12px; line-height: 1.4; }
+.tl-abtn:hover { background: var(--panel-3); border-color: var(--border-hover); }
+.tl-abtn.primary { background: var(--accent); color: var(--on-accent);
+  border-color: var(--accent); font-weight: 600; }
+.tl-abtn.primary:hover { background: var(--accent-85); }
+.tl-abtn.ghost { color: var(--muted); }
+.tl-selinfo { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.tl-track-toggle { width: 26px; height: 15px; border-radius: 8px; flex: none;
+  border: 1px solid var(--border); background: var(--panel-3); position: relative;
+  cursor: pointer; margin-right: 2px; }
+.tl-track-toggle.on { background: var(--ok); border-color: var(--ok); }
+.tl-track-toggle::after { content: ""; position: absolute; top: 1px; left: 1px;
+  width: 11px; height: 11px; border-radius: 50%; background: #10131a; transition: .15s; }
+.tl-track-toggle.on::after { left: 12px; }
+.tl-track-head { display: flex; align-items: center; gap: 6px; flex: none;
+  width: var(--tl-label-w); padding-left: 8px; }
+
+/* Timeline keyboard-shortcuts cheat-sheet (toggled with "?") */
+#tl-shortcuts {
+  position: fixed;
+  inset: 0;
+  z-index: 2100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.5);
+}
+#tl-shortcuts[hidden] { display: none; }
+#tl-shortcuts .tl-sc-card {
+  background: var(--panel, #1e1e24);
+  color: var(--text, #f0f0f0);
+  border: 1px solid var(--border, #3a3a44);
+  border-radius: 10px;
+  padding: 20px 24px;
+  min-width: 280px;
+  max-width: 90vw;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+}
+#tl-shortcuts h3 { margin: 0 0 12px; font-size: 1.05rem; }
+#tl-shortcuts dl {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 8px 18px;
+  margin: 0;
+}
+#tl-shortcuts dt {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-weight: 600;
+  white-space: nowrap;
+  text-align: right;
+}
+#tl-shortcuts dd { margin: 0; }
+
+/* Export-job filmstrip preview: one 16:9 tile, scrubs through a 10-frame
+   sprite on hover. Sprite is 10 tiles wide, so background-size:1000% shows
+   exactly one tile; the keyframes step background-position across all 10. */
+.export-preview-col { width: 136px; }
+.export-thumb {
+  width: 128px;
+  height: 72px;
+  border-radius: 4px;
+  background-color: #000;
+  background-repeat: no-repeat;
+  background-size: 1000% 100%;
+  background-position: 0 0;
+}
+.export-thumb:hover {
+  animation: export-scrub 1.2s steps(10, jump-none) infinite;
+}
+/* Only finished jobs' thumbs are clickable (they carry data-job-id and open
+   the export in the player modal). */
+.export-thumb[data-job-id] { cursor: pointer; }
+.export-thumb--empty {
+  background: none;
+}
+/* While a finished job's filmstrip is still being generated, show a shimmer
+   placeholder in the same tile. It carries data-job-id so it's click-to-play;
+   it swaps to the real strip on the export_preview_ready event. Override the
+   base 1000% sprite sizing and the :hover scrub (no sprite to scrub yet). */
+.export-thumb--loading,
+.export-thumb--loading:hover {
+  background-color: var(--panel-2);
+  background-image: linear-gradient(
+    100deg,
+    transparent 30%,
+    rgba(255, 255, 255, 0.07) 50%,
+    transparent 70%
+  );
+  background-repeat: no-repeat;
+  background-size: 200% 100%;
+  animation: export-shimmer 1.3s ease-in-out infinite;
+}
+@keyframes export-scrub {
+  from { background-position-x: 0%; }
+  to   { background-position-x: 100%; }
+}
+@keyframes export-shimmer {
+  from { background-position-x: 150%; }
+  to   { background-position-x: -150%; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .export-thumb:hover,
+  .export-thumb--loading,
+  .export-thumb--loading:hover { animation: none; }
+}
+
+/* ---- Toasts ---------------------------------------------------------- */
+#toast-container {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 11000;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: min(380px, calc(100vw - 32px));
+  pointer-events: none;
+}
+.toast {
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 8px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.4);
+  font-size: 13px;
+  opacity: 0;
+  transform: translateY(8px);
+  transition: opacity 0.18s ease, transform 0.18s ease;
+}
+.toast--in { opacity: 1; transform: translateY(0); }
+.toast--success { border-left-color: var(--ok); }
+.toast--error { border-left-color: var(--err); }
+.toast__msg { flex: 1 1 auto; }
+.toast__action {
+  flex: 0 0 auto;
+  background: none;
+  border: none;
+  color: var(--accent);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 2px 4px;
+  white-space: nowrap;
+}
+.toast__action:hover { text-decoration: underline; }
+.toast__close {
+  flex: 0 0 auto;
+  background: none;
+  border: none;
+  color: var(--muted);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 2px 4px;
+}
+.toast__close:hover { color: var(--text); }
+@media (prefers-reduced-motion: reduce) {
+  .toast { transition: none; transform: none; }
+}
