@@ -1878,7 +1878,11 @@ function renderQueue() {
 function renderKindBadge(it) {
   const cam = it.kind_camera || it.camera || "";
   const evt = it.kind_event || "";
-  const camLabel = CAMERA_LABELS[cam] || "?";
+  // hasOwn guard: cam comes from API data, and a plain-object
+  // lookup would resolve prototype keys ("constructor", …) to
+  // functions instead of "?".
+  const camLabel = Object.hasOwn(CAMERA_LABELS, cam)
+    ? CAMERA_LABELS[cam] : "?";
   const parts = [`<span class="kind-badge kind-${escHtml(cam)}">${camLabel}</span>`];
   if (evt === "parking") {
     parts.push(`<span class="kind-badge kind-parking">Parking</span>`);

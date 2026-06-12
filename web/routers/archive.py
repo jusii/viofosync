@@ -26,10 +26,10 @@ from ..services import tasks as _tasks
 from ..services import gps as gps_service
 from ..services.naming import (
     CAMERAS,
-    CHANNEL_FOR_LETTER,
     CHANNEL_LABELS,
     CHANNEL_ORDER,
     channel_of,
+    pair_slot_of,
 )
 
 log = logging.getLogger("viofosync.archive")
@@ -208,8 +208,7 @@ def get_day(
     # numbers, so keying on sequence wouldn't pair them.
     # event_type keeps parking (PF/PR) separate from normal (F/R).
     # Slot is the registry channel of the last letter, so PF/EF
-    # still = front; unknown letters keep their historical rear
-    # fallback.
+    # still = front.
     slots = [c.channel for c in CAMERAS]
     pairs: dict[tuple[int, str], dict] = defaultdict(
         lambda: dict.fromkeys([*slots, "sequence"])
@@ -217,10 +216,9 @@ def get_day(
     for r in rows:
         if not _in_range(r["timestamp"]):
             continue
-        cam = (r["camera"] or "").upper()
         kind = r["event_type"] or "normal"
         key = (r["timestamp"], kind)
-        slot = CHANNEL_FOR_LETTER.get(cam[-1:], "rear")
+        slot = pair_slot_of(r["camera"])
         pairs[key][slot] = dict(r)
         # Prefer the front sequence number for the pair; fall
         # back to any other camera's if there's no front clip.

@@ -51,3 +51,14 @@ def channel_of(camera: str | None) -> str:
     if not camera:
         return "other"
     return CHANNEL_FOR_LETTER.get(camera[-1].upper(), "other")
+
+
+def pair_slot_of(camera: str | None) -> str:
+    """Like :func:`channel_of`, but with the pairers' historical
+    ``"rear"`` fallback: when the archive day view and the export
+    pairer group same-capture clips into slots, an unknown letter
+    has always been filed under rear rather than given its own
+    slot."""
+    if not camera:
+        return "rear"
+    return CHANNEL_FOR_LETTER.get(camera[-1].upper(), "rear")

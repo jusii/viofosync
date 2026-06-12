@@ -7,6 +7,13 @@ Split into three private submodules by responsibility:
 - :mod:`viofosync_lib._protocol` — HTTP API to the dashcam (XML
   listing, HTML scrape, byte downloader)
 - :mod:`viofosync_lib._gpx` — MP4 atom parsing + GPX generation
+
+plus one deliberately public submodule:
+
+- :mod:`viofosync_lib.cameras` — the camera registry (which
+  lenses exist and how a filename's trailing letter maps to one).
+  Imported directly (``from viofosync_lib.cameras import …``) by
+  both this package and the web layer.
 """
 from __future__ import annotations
 

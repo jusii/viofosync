@@ -8,13 +8,13 @@ fails here first.
 """
 from __future__ import annotations
 
+from viofosync_lib._archive import downloaded_filename_glob
 from viofosync_lib.cameras import (
     CAMERA_LETTERS,
     CAMERAS,
     CHANNEL_FOR_LETTER,
-    channel_of,
+    pair_slot_of,
 )
-from viofosync_lib._archive import downloaded_filename_glob
 from web.services import naming
 
 
@@ -41,17 +41,37 @@ def test_channel_for_letter_matches_registry():
     }
 
 
-def test_channel_of_handles_prefixes_case_and_unknown():
-    assert channel_of("F") == "front"
-    assert channel_of("PT") == "tele"
-    assert channel_of("ei") == "interior"
-    assert channel_of("X") == "other"
-    assert channel_of("") == "other"
-    assert channel_of(None) == "other"
+def test_pair_slot_of_rear_fallback():
+    # channel_of sends unknowns to "other"; the pairers' slot
+    # helper keeps their historical rear fallback instead.
+    assert pair_slot_of("F") == "front"
+    assert pair_slot_of("PT") == "tele"
+    assert pair_slot_of("X") == "rear"
+    assert pair_slot_of("") == "rear"
+    assert pair_slot_of(None) == "rear"
 
 
 def test_glob_derivation():
     assert downloaded_filename_glob.endswith(f"_*[{CAMERA_LETTERS}].MP4")
+
+
+def test_js_mirror_matches_registry():
+    """app.js hand-mirrors the registry (no bundler, so it can't
+    import it). Extract the JS CAMERAS table and compare, so the
+    two can't drift apart silently."""
+    import re
+    from pathlib import Path
+
+    repo = Path(__file__).resolve().parents[1]
+    js = (repo / "web" / "static" / "app.js").read_text()
+    rows = re.findall(
+        r'\{\s*letter:\s*"(\w)",\s*channel:\s*"(\w+)",\s*'
+        r'label:\s*"(\w+)"\s*\}',
+        js,
+    )
+    assert rows == [
+        (c.letter, c.channel, c.label) for c in CAMERAS
+    ], "web/static/app.js CAMERAS table is out of sync with the registry"
 
 
 # --- Derived export-type tables pin the pre-registry literals ----
