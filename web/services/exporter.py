@@ -6,13 +6,16 @@ out to ffmpeg, and parses ``-progress pipe:1`` output so the
 frontend can show a progress bar via the same WebSocket the
 downloader uses.
 
-Job types:
-  * ``join_front`` — concat demuxer on front clips only
-  * ``join_rear``  — same for rear
-  * ``pip``        — picture-in-picture: front fullscreen +
-                     rear inset. Requires paired clips.
-  * ``pip_rear``   — picture-in-picture with rear fullscreen +
-                     front inset. Requires paired clips.
+Job types (derived per camera from the registry — see
+``naming.EXPORT_JOB_TYPES``):
+  * ``join_<channel>`` — concat demuxer on that camera's clips
+    (``join_front``, ``join_rear``, ``join_tele``,
+    ``join_interior``)
+  * ``pip``            — picture-in-picture: front fullscreen +
+                         rear inset. Requires paired clips.
+  * ``pip_<channel>``  — picture-in-picture with that camera
+                         fullscreen + front inset. Requires
+                         paired clips.
 
 Outputs land in ``$RECORDINGS/.exports/{job_id}.mp4`` and are
 served by the archive router via a standard ``FileResponse``.
@@ -46,7 +49,14 @@ from ..db import Database
 from ..settings import SettingsProvider
 from . import durations, export_preview
 from . import tasks as _tasks
-from .naming import channel_of
+from .naming import (
+    CHANNEL_FOR_LETTER,
+    EXPORT_JOB_TYPES,
+    JOIN_LETTER_FOR_TYPE,
+    PIP_MAIN_FOR_TYPE,
+    PIP_PARTNER_FOR_TYPE,
+    channel_of,
+)
 
 log = logging.getLogger("viofosync.exporter")
 
@@ -619,10 +629,7 @@ class ExportWorker:
     ) -> int:
         if not ffmpeg_available():
             raise RuntimeError("ffmpeg not installed on this host")
-        if job_type not in (
-            "join_front", "join_rear", "join_tele", "join_interior",
-            "pip", "pip_rear", "pip_tele", "pip_interior",
-        ):
+        if job_type not in EXPORT_JOB_TYPES:
             raise ValueError(f"unknown job type: {job_type}")
         if not clip_ids:
             raise ValueError("no clips selected")
@@ -893,14 +900,8 @@ class ExportWorker:
 
         clips = self._fetch_clips(clip_ids)
 
-        join_wanted = {
-            "join_front": "F",
-            "join_rear": "R",
-            "join_tele": "T",
-            "join_interior": "I",
-        }
-        if job["type"] in join_wanted:
-            wanted = join_wanted[job["type"]]
+        if job["type"] in JOIN_LETTER_FOR_TYPE:
+            wanted = JOIN_LETTER_FOR_TYPE[job["type"]]
             # ``camera`` may be ``F``, ``R``, ``PF``, ``PR``, etc.
             # The last letter identifies the lens.
             selected = [
@@ -918,10 +919,7 @@ class ExportWorker:
             # The PiP partner is the non-front camera; ``main``
             # chooses which side is fullscreen. Front is always
             # ffmpeg input 0 (it carries the mic audio).
-            partner = {
-                "pip_tele": "tele",
-                "pip_interior": "interior",
-            }.get(job["type"], "rear")
+            partner = PIP_PARTNER_FOR_TYPE[job["type"]]
             pairs = self._pair_clips(
                 clips, required=("front", partner),
             )
@@ -931,11 +929,7 @@ class ExportWorker:
                     f"no front+{partner} pairs in selection", None,
                 )
                 return
-            main = {
-                "pip_rear": "rear",
-                "pip_tele": "tele",
-                "pip_interior": "interior",
-            }.get(job["type"], "front")
+            main = PIP_MAIN_FOR_TYPE[job["type"]]
             await self._pip(
                 job["id"], pairs, out, encoder,
                 snap.pip_position, main=main, partner=partner,
@@ -951,16 +945,15 @@ class ExportWorker:
         # Viofo gives same-capture clips identical timestamps but
         # consecutive sequences, so key on (timestamp, event_type)
         # and pick the slot from the trailing letter of ``camera``
-        # (handles PF/PR/PT/PI too). ``required`` names the slots
+        # (handles PF/PR/PT/PI too — unknown letters keep their
+        # historical rear fallback). ``required`` names the slots
         # a group must have to count as a complete pair.
         pairs: dict[tuple[int, str], dict] = {}
         for c in clips:
             cam = (c["camera"] or "").upper()
             kind = c.get("event_type") or "normal"
             key = (c["timestamp"], kind)
-            slot = {"F": "front", "T": "tele", "I": "interior"}.get(
-                cam[-1:], "rear"
-            )
+            slot = CHANNEL_FOR_LETTER.get(cam[-1:], "rear")
             pairs.setdefault(key, {})[slot] = c
         return [
             p for p in sorted(pairs.items())

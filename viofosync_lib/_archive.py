@@ -13,6 +13,8 @@ import os
 import re
 from collections import namedtuple
 
+from .cameras import CAMERA_LETTERS
+
 logger = logging.getLogger("viofosync_lib.archive")
 
 # Recording namedtuple matching Viofo's file information.
@@ -31,12 +33,11 @@ group_name_globs = {
 }
 
 # Downloaded recording filename glob pattern. The trailing
-# letter is the camera: F=front, R=rear, T=telephoto,
-# I=interior.
+# letter is the camera (see cameras.py for the registry).
 downloaded_filename_glob = (
     "[0-9][0-9][0-9][0-9]_[0-9][0-9][0-9][0-9]"
     "_[0-9][0-9][0-9][0-9][0-9][0-9]"
-    "_*[FRTI].MP4"
+    f"_*[{CAMERA_LETTERS}].MP4"
 )
 
 # Downloaded recording filename regular expression.

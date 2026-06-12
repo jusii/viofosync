@@ -182,12 +182,12 @@ def reconcile(
 def _camera_from_filename(filename: str) -> Optional[str]:
     # Handles both ``…_0001F.MP4`` and ``…_0001PF.MP4`` /
     # ``…_0001EF.MP4`` — the optional prefix letter encodes the
-    # event type (P=parking, E=event). The camera letter is
-    # F=front, R=rear, T=telephoto, I=interior — 3-channel
-    # models pair F+R with either T or I.
+    # event type (P=parking, E=event); the camera letter set
+    # comes from the registry.
     import re as _re
+    from viofosync_lib.cameras import CAMERA_LETTERS
     m = _re.match(
-        r"^\d{4}_\d{4}_\d{6}_\d+[PE]?([FRTI])\.MP4$",
+        rf"^\d{{4}}_\d{{4}}_\d{{6}}_\d+[PE]?([{CAMERA_LETTERS}])\.MP4$",
         filename,
         _re.IGNORECASE,
     )
@@ -196,8 +196,9 @@ def _camera_from_filename(filename: str) -> Optional[str]:
 
 def _event_from_filename(filename: str) -> Optional[str]:
     import re as _re
+    from viofosync_lib.cameras import CAMERA_LETTERS
     m = _re.match(
-        r"^\d{4}_\d{4}_\d{6}_\d+([PE])?[FRTI]\.MP4$",
+        rf"^\d{{4}}_\d{{4}}_\d{{6}}_\d+([PE])?[{CAMERA_LETTERS}]\.MP4$",
         filename,
         _re.IGNORECASE,
     )
@@ -441,7 +442,7 @@ def list_page(
 
 def _day_expr() -> str:
     """SQL expression for the YYYY-MM-DD day key derived from
-    the filename (``YYYY_MMDD_HHMMSS_NN[FR].MP4``). Uses the
+    the filename (``YYYY_MMDD_HHMMSS_NN[FRTI].MP4``). Uses the
     filename rather than ``recorded_at`` so grouping is
     consistent even for rows missing a timestamp."""
     return (
@@ -558,7 +559,7 @@ def list_day_items(
 ) -> List[dict]:
     """Return all queue items for a given day (``YYYY-MM-DD``),
     newest recording first. Filenames start with
-    ``YYYY_MMDD_HHMMSS_NN[FR]`` so a plain text DESC sort gives
+    ``YYYY_MMDD_HHMMSS_NN[FRTI]`` so a plain text DESC sort gives
     reverse time-of-day order with front/rear pairs adjacent.
     ``queue_position`` is still computed against the real
     download order (priority + enqueued_at) so the client can

@@ -99,7 +99,7 @@ CREATE TABLE IF NOT EXISTS clip_index (
     basename      TEXT NOT NULL,
     group_name    TEXT,
     timestamp     INTEGER NOT NULL,   -- unix seconds
-    camera        TEXT NOT NULL,      -- 'F' or 'R' or other
+    camera        TEXT NOT NULL,      -- registry letter (F/R/T/I), possibly P/E-prefixed
     sequence      INTEGER NOT NULL,
     event_type    TEXT,               -- 'normal'|'parking'|'ro'
     size_bytes    INTEGER,
@@ -136,7 +136,7 @@ CREATE INDEX IF NOT EXISTS idx_queue_state
 
 CREATE TABLE IF NOT EXISTS export_jobs (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    type          TEXT NOT NULL,      -- join_front|join_rear|pip|pip_rear|timeline
+    type          TEXT NOT NULL,      -- join_/pip_ per camera (see naming.EXPORT_JOB_TYPES) or timeline
     clip_ids      TEXT NOT NULL,      -- JSON array
     state         TEXT NOT NULL,      -- queued|running|done|failed|cancelled
     progress      REAL NOT NULL DEFAULT 0.0,

@@ -24,7 +24,13 @@ from ..auth import require_csrf, require_session
 from ..services import durations, filmstrip, route_cache, scanner, thumbs
 from ..services import tasks as _tasks
 from ..services import gps as gps_service
-from ..services.naming import CHANNEL_LABELS, CHANNEL_ORDER, channel_of
+from ..services.naming import (
+    CAMERAS,
+    CHANNEL_FOR_LETTER,
+    CHANNEL_LABELS,
+    CHANNEL_ORDER,
+    channel_of,
+)
 
 log = logging.getLogger("viofosync.archive")
 
@@ -201,15 +207,12 @@ def get_day(
     # one capture share a timestamp but get consecutive sequence
     # numbers, so keying on sequence wouldn't pair them.
     # event_type keeps parking (PF/PR) separate from normal (F/R).
-    # Slot is picked from the last letter so PF/EF still = front.
-    # 3-channel models add either T (telephoto) or I (interior)
-    # alongside F+R.
+    # Slot is the registry channel of the last letter, so PF/EF
+    # still = front; unknown letters keep their historical rear
+    # fallback.
+    slots = [c.channel for c in CAMERAS]
     pairs: dict[tuple[int, str], dict] = defaultdict(
-        lambda: {
-            "front": None, "rear": None,
-            "tele": None, "interior": None,
-            "sequence": None,
-        }
+        lambda: dict.fromkeys([*slots, "sequence"])
     )
     for r in rows:
         if not _in_range(r["timestamp"]):
@@ -217,9 +220,7 @@ def get_day(
         cam = (r["camera"] or "").upper()
         kind = r["event_type"] or "normal"
         key = (r["timestamp"], kind)
-        slot = {"F": "front", "T": "tele", "I": "interior"}.get(
-            cam[-1:], "rear"
-        )
+        slot = CHANNEL_FOR_LETTER.get(cam[-1:], "rear")
         pairs[key][slot] = dict(r)
         # Prefer the front sequence number for the pair; fall
         # back to any other camera's if there's no front clip.
@@ -234,10 +235,7 @@ def get_day(
             "sequence": pair["sequence"],
             "event_type": kind,
             "iso": _dt.datetime.fromtimestamp(ts).isoformat(),
-            "front": pair["front"],
-            "rear": pair["rear"],
-            "tele": pair["tele"],
-            "interior": pair["interior"],
+            **{s: pair[s] for s in slots},
         })
 
     return {"date": date, "clips": clips}

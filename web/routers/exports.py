@@ -12,7 +12,12 @@ from pydantic import BaseModel, Field
 
 from ..auth import require_csrf, require_session
 from ..services import export_preview
-from ..services.naming import export_download_name, parse_clip_ids
+from ..services.naming import (
+    CHANNEL_ORDER,
+    EXPORT_JOB_TYPES,
+    export_download_name,
+    parse_clip_ids,
+)
 
 # 1x1 transparent PNG — served when a preview can't be produced (job not done,
 # unknown, or generation failed), so the <img> degrades cleanly.
@@ -55,17 +60,14 @@ def _resolve_default_encoder(app_state) -> str:
 
 
 class Segment(BaseModel):
-    channel: str = Field(pattern="^(front|rear|tele|interior|other)$")
+    channel: str = Field(pattern=f"^({'|'.join(CHANNEL_ORDER)})$")
     start_ts: float
     end_ts: float
 
 
 class CreateExport(BaseModel):
     type: str = Field(
-        pattern=(
-            "^(join_front|join_rear|join_tele|join_interior"
-            "|pip|pip_rear|pip_tele|pip_interior|timeline)$"
-        )
+        pattern=f"^({'|'.join((*EXPORT_JOB_TYPES, 'timeline'))})$"
     )
     clip_ids: List[int] = []
     segments: list[Segment] | None = None
