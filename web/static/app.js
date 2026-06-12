@@ -4,6 +4,27 @@
 // All mutating calls send X-CSRF-Token. The token is returned by
 // /api/auth/login and refreshed via /api/auth/csrf on 403.
 
+// Camera registry — mirror of viofosync_lib/cameras.py; keep the two
+// in sync. Order = display/cycle order. ``letter`` is the filename
+// suffix (and data-camera attribute), ``channel`` the API key (pair
+// slots, export type suffixes, element id suffixes), ``label`` the
+// human string. front+rear always exist; a 3-channel model adds one
+// of the others.
+const CAMERAS = [
+  { letter: "F", channel: "front",    label: "Front" },
+  { letter: "R", channel: "rear",     label: "Rear" },
+  { letter: "T", channel: "tele",     label: "Tele" },
+  { letter: "I", channel: "interior", label: "Interior" },
+];
+const CAMERA_LABELS = Object.fromEntries(
+  CAMERAS.map((c) => [c.letter, c.label]),
+);
+// The third-camera slots whose UI (thumbs, action groups) only
+// appears when the data contains them.
+const EXTRA_CAMERAS = CAMERAS.filter(
+  (c) => c.channel !== "front" && c.channel !== "rear",
+);
+
 const state = {
   csrf: null,
   modalClip: null,         // { id, camera, dayEl, timelines }
@@ -983,11 +1004,14 @@ function renderClipPair(pair) {
       <label><input type="checkbox" data-pair="${pair.timestamp}_${pair.sequence}" /> ${time}</label>
       ${kindBadge}
     </div>
-    <div class="thumbs">${thumb(pair.front, "F")}${thumb(pair.rear, "R")}${
-      // Third camera (telephoto or interior) renders only when
-      // present so 2-camera days keep their familiar two columns.
-      pair.tele ? thumb(pair.tele, "T") : ""
-    }${pair.interior ? thumb(pair.interior, "I") : ""}</div>
+    <div class="thumbs">${CAMERAS.map((c) =>
+      // front/rear always render (placeholder when missing); a
+      // third camera renders only when present so 2-camera days
+      // keep their familiar two columns.
+      c.channel === "front" || c.channel === "rear"
+        ? thumb(pair[c.channel], c.letter)
+        : pair[c.channel] ? thumb(pair[c.channel], c.letter) : ""
+    ).join("")}</div>
   `;
   el.querySelectorAll(".thumb img").forEach((img) => {
     img.addEventListener("click", (e) => {
@@ -1010,10 +1034,9 @@ function renderClipPair(pair) {
       };
       state.archiveSelected.set(pairId, {
         ts: Number(el.dataset.ts),
-        front: clipId("F"),
-        rear: clipId("R"),
-        tele: clipId("T"),
-        interior: clipId("I"),
+        ...Object.fromEntries(
+          CAMERAS.map((c) => [c.channel, clipId(c.letter)]),
+        ),
       });
     } else {
       state.archiveSelected.delete(pairId);
@@ -1090,47 +1113,40 @@ function updateArchiveActions() {
     label.textContent = `${n} selected`;
     bar.classList.add("has-selection");
   }
-  let fronts = 0, rears = 0, both = 0;
-  let teles = 0, interiors = 0, frontTele = 0, frontInterior = 0;
+  // Per-camera selection counts, plus front+partner pair counts
+  // for the PiP buttons.
+  const count = Object.fromEntries(CAMERAS.map((c) => [c.channel, 0]));
+  const withFront = Object.fromEntries(
+    CAMERAS.map((c) => [c.channel, 0]),
+  );
   for (const v of state.archiveSelected.values()) {
-    if (v.front) fronts++;
-    if (v.rear) rears++;
-    if (v.front && v.rear) both++;
-    if (v.tele) teles++;
-    if (v.interior) interiors++;
-    if (v.front && v.tele) frontTele++;
-    if (v.front && v.interior) frontInterior++;
+    for (const c of CAMERAS) {
+      if (v[c.channel]) count[c.channel]++;
+      if (v.front && v[c.channel]) withFront[c.channel]++;
+    }
   }
-  const hasFront = fronts > 0, hasRear = rears > 0, hasPair = both > 0;
+  const hasFront = count.front > 0, hasRear = count.rear > 0;
+  const hasPair = withFront.rear > 0;
   document.getElementById("dl-orig-front").disabled = !hasFront;
   document.getElementById("dl-orig-rear").disabled = !hasRear;
   document.getElementById("export-join-front").disabled = !hasFront;
   document.getElementById("export-join-rear").disabled = !hasRear;
   document.getElementById("export-pip-front").disabled = !hasPair;
   document.getElementById("export-pip-rear").disabled = !hasPair;
-  // Third-camera (tele / interior) actions: the whole button group
-  // stays hidden until the selection contains a clip from that
-  // camera, so 2-camera setups see the original action bar
-  // unchanged.
-  const camGroup = (cam, present, dl, join, pip, pipOk) => {
-    const group = document.getElementById(`actions-${cam}`);
-    if (!group) return;
+  // Third-camera actions: the whole button group stays hidden until
+  // the selection contains a clip from that camera, so 2-camera
+  // setups see the original action bar unchanged.
+  for (const c of EXTRA_CAMERAS) {
+    const group = document.getElementById(`actions-${c.channel}`);
+    if (!group) continue;
+    const present = count[c.channel] > 0;
     group.hidden = !present;
-    if (!present) return;
-    document.getElementById(dl).disabled = !present;
-    document.getElementById(join).disabled = !present;
-    document.getElementById(pip).disabled = !pipOk;
-  };
-  camGroup(
-    "tele", teles > 0,
-    "dl-orig-tele", "export-join-tele", "export-pip-tele",
-    frontTele > 0,
-  );
-  camGroup(
-    "interior", interiors > 0,
-    "dl-orig-interior", "export-join-interior",
-    "export-pip-interior", frontInterior > 0,
-  );
+    if (!present) continue;
+    document.getElementById(`dl-orig-${c.channel}`).disabled = false;
+    document.getElementById(`export-join-${c.channel}`).disabled = false;
+    document.getElementById(`export-pip-${c.channel}`).disabled =
+      withFront[c.channel] === 0;
+  }
   document.getElementById("clear-selection").disabled = n === 0;
 }
 
@@ -1178,22 +1194,20 @@ function downloadOriginals(slot) {
 }
 
 async function submitExport(type) {
+  // join_<channel> takes that channel's clips; the pip family takes
+  // front + the partner channel ("pip" is the legacy front-main +
+  // rear name, "pip_<channel>" makes the partner fullscreen).
+  const joinCh = type.startsWith("join_") ? type.slice(5) : null;
+  const pipCh =
+    type === "pip" ? "rear"
+    : type.startsWith("pip_") ? type.slice(4)
+    : null;
   const ids = [];
   for (const v of state.archiveSelected.values()) {
-    if (type === "join_front" && v.front) ids.push(v.front);
-    else if (type === "join_rear" && v.rear) ids.push(v.rear);
-    else if (type === "join_tele" && v.tele) ids.push(v.tele);
-    else if (type === "join_interior" && v.interior) {
-      ids.push(v.interior);
-    } else if (type === "pip" || type === "pip_rear") {
+    if (joinCh && v[joinCh]) ids.push(v[joinCh]);
+    else if (pipCh) {
       if (v.front) ids.push(v.front);
-      if (v.rear) ids.push(v.rear);
-    } else if (type === "pip_tele") {
-      if (v.front) ids.push(v.front);
-      if (v.tele) ids.push(v.tele);
-    } else if (type === "pip_interior") {
-      if (v.front) ids.push(v.front);
-      if (v.interior) ids.push(v.interior);
+      if (v[pipCh]) ids.push(v[pipCh]);
     }
   }
   if (!ids.length) return;
@@ -1255,30 +1269,19 @@ document.getElementById("exports-toggle").addEventListener("click", () => {
   setExportsPanelOpen(!open);
 });
 
-document.getElementById("dl-orig-front")
-  .addEventListener("click", () => downloadOriginals("front"));
-document.getElementById("dl-orig-rear")
-  .addEventListener("click", () => downloadOriginals("rear"));
-document.getElementById("export-join-front")
-  .addEventListener("click", () => submitExport("join_front"));
-document.getElementById("export-join-rear")
-  .addEventListener("click", () => submitExport("join_rear"));
-document.getElementById("export-pip-front")
-  .addEventListener("click", () => submitExport("pip"));
-document.getElementById("export-pip-rear")
-  .addEventListener("click", () => submitExport("pip_rear"));
-document.getElementById("dl-orig-tele")
-  .addEventListener("click", () => downloadOriginals("tele"));
-document.getElementById("export-join-tele")
-  .addEventListener("click", () => submitExport("join_tele"));
-document.getElementById("export-pip-tele")
-  .addEventListener("click", () => submitExport("pip_tele"));
-document.getElementById("dl-orig-interior")
-  .addEventListener("click", () => downloadOriginals("interior"));
-document.getElementById("export-join-interior")
-  .addEventListener("click", () => submitExport("join_interior"));
-document.getElementById("export-pip-interior")
-  .addEventListener("click", () => submitExport("pip_interior"));
+// One originals/join/pip button trio per camera. "pip" is the
+// legacy name of the front-main job; every other camera's PiP is
+// pip_<channel>.
+for (const c of CAMERAS) {
+  const ch = c.channel;
+  document.getElementById(`dl-orig-${ch}`)
+    .addEventListener("click", () => downloadOriginals(ch));
+  document.getElementById(`export-join-${ch}`)
+    .addEventListener("click", () => submitExport(`join_${ch}`));
+  document.getElementById(`export-pip-${ch}`)
+    .addEventListener("click", () =>
+      submitExport(ch === "front" ? "pip" : `pip_${ch}`));
+}
 document.getElementById("clear-selection")
   .addEventListener("click", clearSelection);
 
@@ -1604,15 +1607,17 @@ function renderExportJobs(jobs) {
 
 // ---------- Video modal + nav ----------
 
-// Camera letters in modal cycle order. Only F+R plus one of T
-// (telephoto) or I (interior) exist on any single device, but
-// keeping all four here costs nothing — absent cameras have empty
-// timelines and the cycle skips them.
-const MODAL_CAMERAS = ["F", "R", "T", "I"];
+// Modal camera cycle follows registry order. Only F+R plus one of
+// the extras exist on any single device, but keeping them all costs
+// nothing — absent cameras have empty timelines and the cycle
+// skips them.
+const MODAL_CAMERAS = CAMERAS.map((c) => c.letter);
 
 function buildCameraTimelines(scopeEl) {
   const root = scopeEl || document.getElementById("view-archive");
-  const timelines = { F: [], R: [], T: [], I: [] };
+  const timelines = Object.fromEntries(
+    MODAL_CAMERAS.map((cam) => [cam, []]),
+  );
   root.querySelectorAll(".thumb[data-clip-id]").forEach((el) => {
     const entry = {
       id: Number(el.dataset.clipId),
@@ -1683,13 +1688,9 @@ function updateModalNav() {
   const next_ = curr ? nextCameraClip(mc, curr.ts) : null;
   toggle.disabled = !next_;
   if (next_) {
-    toggle.textContent = `${CAMERA_VIEW_LABELS[next_.camera]} view`;
+    toggle.textContent = `${CAMERA_LABELS[next_.camera]} view`;
   }
 }
-
-const CAMERA_VIEW_LABELS = {
-  F: "Front", R: "Rear", T: "Tele", I: "Interior",
-};
 
 // The next camera (cycling F→R→T→I→F) that has a clip at ``ts``,
 // or null when the current camera is the only one — the cycle
@@ -1877,12 +1878,7 @@ function renderQueue() {
 function renderKindBadge(it) {
   const cam = it.kind_camera || it.camera || "";
   const evt = it.kind_event || "";
-  const camLabel =
-    cam === "F" ? "Front"
-    : cam === "R" ? "Rear"
-    : cam === "T" ? "Tele"
-    : cam === "I" ? "Interior"
-    : "?";
+  const camLabel = CAMERA_LABELS[cam] || "?";
   const parts = [`<span class="kind-badge kind-${escHtml(cam)}">${camLabel}</span>`];
   if (evt === "parking") {
     parts.push(`<span class="kind-badge kind-parking">Parking</span>`);
