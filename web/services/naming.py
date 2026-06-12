@@ -1,18 +1,23 @@
-"""Derive sensible download filenames for joined/PiP exports.
+"""Camera facade for the web layer + export filename derivation.
 
-Pure functions — no DB or HTTP. ``build_basename`` turns a set of
-clips plus a camera label into a stem like
-``2024-03-15_1430-1502_front_4clips`` (date + time-range + camera
-+ clip count). ``export_download_name`` maps an export job type to
-a label and appends ``.mp4``, falling back to the legacy
-``viofosync_export_{id}.mp4`` when the source clips are gone
-(retention) or the type is unknown.
+Pure functions — no DB or HTTP. Two roles:
 
-(Original, un-joined clips are downloaded individually and keep
-their dashcam basenames — they don't go through this module.)
+1. The web app's view of the camera registry
+   (viofosync_lib/cameras.py): re-exports plus the derived
+   per-camera export job types (``join_<channel>``, ``pip``/
+   ``pip_<channel>``) with their letter/partner/main tables, and
+   the timeline channel order/labels.
 
-Timestamps are unix seconds formatted in local time, matching how
-the archive UI renders clip times (web/routers/archive.py).
+2. Download filenames for joined/PiP exports: ``build_basename``
+   turns a set of clips plus a camera label into a stem like
+   ``2024-03-15_1430-1502_front_4clips``; ``export_download_name``
+   maps an export job type to a label and appends ``.mp4``,
+   falling back to the legacy ``viofosync_export_{id}.mp4`` when
+   the source clips are gone (retention) or the type is unknown.
+   (Original, un-joined clips keep their dashcam basenames — they
+   don't go through this module.) Timestamps are unix seconds
+   formatted in local time, matching how the archive UI renders
+   clip times (web/routers/archive.py).
 """
 from __future__ import annotations
 
@@ -22,8 +27,8 @@ from typing import List
 
 from viofosync_lib.cameras import (  # noqa: F401 — re-exported
     CAMERAS,
-    CHANNEL_FOR_LETTER,
     channel_of,
+    pair_slot_of,
 )
 
 # --- Per-camera export job types, derived from the registry ----------

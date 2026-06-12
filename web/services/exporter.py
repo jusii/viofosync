@@ -50,12 +50,12 @@ from ..settings import SettingsProvider
 from . import durations, export_preview
 from . import tasks as _tasks
 from .naming import (
-    CHANNEL_FOR_LETTER,
     EXPORT_JOB_TYPES,
     JOIN_LETTER_FOR_TYPE,
     PIP_MAIN_FOR_TYPE,
     PIP_PARTNER_FOR_TYPE,
     channel_of,
+    pair_slot_of,
 )
 
 log = logging.getLogger("viofosync.exporter")
@@ -945,16 +945,13 @@ class ExportWorker:
         # Viofo gives same-capture clips identical timestamps but
         # consecutive sequences, so key on (timestamp, event_type)
         # and pick the slot from the trailing letter of ``camera``
-        # (handles PF/PR/PT/PI too — unknown letters keep their
-        # historical rear fallback). ``required`` names the slots
+        # (handles PF/PR/PT/PI too). ``required`` names the slots
         # a group must have to count as a complete pair.
         pairs: dict[tuple[int, str], dict] = {}
         for c in clips:
-            cam = (c["camera"] or "").upper()
             kind = c.get("event_type") or "normal"
             key = (c["timestamp"], kind)
-            slot = CHANNEL_FOR_LETTER.get(cam[-1:], "rear")
-            pairs.setdefault(key, {})[slot] = c
+            pairs.setdefault(key, {})[pair_slot_of(c["camera"])] = c
         return [
             p for p in sorted(pairs.items())
             if all(s in p[1] for s in required)
